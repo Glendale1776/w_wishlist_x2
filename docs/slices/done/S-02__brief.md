@@ -1,4 +1,4 @@
-status: pending
+status: done
 id: S-02
 topic: brief.md
 title: Auth routes and return-to-item flow shell

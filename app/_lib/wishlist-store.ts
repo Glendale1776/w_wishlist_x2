@@ -27,14 +27,17 @@ export type WishlistListItem = {
 
 export type WishlistSort = "updated_desc" | "title_asc";
 
-type ShareLinkAuditEvent = {
+export type ShareLinkAuditAction = "rotate_share_link" | "disable_share_link" | "enable_share_link";
+
+export type ShareLinkAuditEvent = {
   id: string;
   wishlistId: string;
   actorEmail: string;
-  action: "rotate_share_link";
+  action: ShareLinkAuditAction;
   createdAt: string;
   after: {
     tokenHint: string;
+    disabledAt: string | null;
   };
 };
 
@@ -109,6 +112,31 @@ function parsePositiveInt(raw: string | undefined, fallback: number) {
   const parsed = Number(raw);
   if (!Number.isFinite(parsed) || parsed <= 0) return fallback;
   return Math.floor(parsed);
+}
+
+function createShareLinkAuditEvent(input: {
+  wishlistId: string;
+  actorEmail: string;
+  action: ShareLinkAuditAction;
+  tokenHint: string;
+  disabledAt: string | null;
+  createdAt?: string;
+}) {
+  const store = getStore();
+  const createdAt = input.createdAt || nowIso();
+  const event: ShareLinkAuditEvent = {
+    id: randomUUID(),
+    wishlistId: input.wishlistId,
+    actorEmail: input.actorEmail,
+    action: input.action,
+    createdAt,
+    after: {
+      tokenHint: input.tokenHint,
+      disabledAt: input.disabledAt,
+    },
+  };
+  store.shareLinkAuditEvents.unshift(event);
+  return event;
 }
 
 function pruneRotationIdempotency(now = Date.now()) {
@@ -327,17 +355,14 @@ export function rotateWishlistShareLink(input: {
   delete store.shareTokensByHash[previousHash];
   store.shareTokensByHash[tokenHash] = token;
 
-  const auditEvent: ShareLinkAuditEvent = {
-    id: randomUUID(),
+  const auditEvent = createShareLinkAuditEvent({
     wishlistId: found.id,
     actorEmail: input.ownerEmail,
     action: "rotate_share_link",
+    tokenHint,
+    disabledAt: found.shareTokenDisabledAt,
     createdAt: timestamp,
-    after: {
-      tokenHint,
-    },
-  };
-  store.shareLinkAuditEvents.unshift(auditEvent);
+  });
 
   return {
     ok: true as const,
@@ -349,11 +374,82 @@ export function rotateWishlistShareLink(input: {
   };
 }
 
-export function listShareLinkAuditEvents(input: { wishlistId?: string }) {
-  const store = getStore();
+export type UpdateShareLinkDisabledError = "NOT_FOUND";
 
-  return store.shareLinkAuditEvents.filter((event) => {
-    if (!input.wishlistId) return true;
-    return event.wishlistId === input.wishlistId;
+export function updateWishlistShareLinkDisabled(input: {
+  wishlistId: string;
+  actorEmail: string;
+  disabled: boolean;
+}) {
+  const store = getStore();
+  const found = store.wishlists.find((wishlist) => wishlist.id === input.wishlistId);
+  if (!found) {
+    return { error: "NOT_FOUND" as UpdateShareLinkDisabledError };
+  }
+
+  const wasDisabled = Boolean(found.shareTokenDisabledAt);
+  const alreadyApplied = input.disabled ? wasDisabled : !wasDisabled;
+
+  if (alreadyApplied) {
+    return {
+      ok: true as const,
+      alreadyApplied: true as const,
+      wishlist: found,
+      auditEventId: null as string | null,
+    };
+  }
+
+  const timestamp = nowIso();
+  found.shareTokenDisabledAt = input.disabled ? timestamp : null;
+  found.updatedAt = timestamp;
+
+  const auditEvent = createShareLinkAuditEvent({
+    wishlistId: found.id,
+    actorEmail: input.actorEmail,
+    action: input.disabled ? "disable_share_link" : "enable_share_link",
+    tokenHint: found.shareTokenHint,
+    disabledAt: found.shareTokenDisabledAt,
+    createdAt: timestamp,
   });
+
+  return {
+    ok: true as const,
+    alreadyApplied: false as const,
+    wishlist: found,
+    auditEventId: auditEvent.id,
+  };
+}
+
+export function listShareLinkAuditEvents(input: {
+  wishlistId?: string;
+  action?: ShareLinkAuditAction;
+  since?: string;
+  limit?: number;
+}) {
+  const store = getStore();
+  const sinceTime = input.since ? new Date(input.since).getTime() : Number.NEGATIVE_INFINITY;
+  const limit = Math.min(Math.max(input.limit ?? 200, 1), 500);
+
+  return store.shareLinkAuditEvents
+    .filter((event) => {
+      if (input.wishlistId && event.wishlistId !== input.wishlistId) return false;
+      if (input.action && event.action !== input.action) return false;
+      if (new Date(event.createdAt).getTime() < sinceTime) return false;
+      return true;
+    })
+    .slice(0, limit);
+}
+
+export function pruneShareLinkAuditEvents(input: { retentionDays: number }) {
+  const safeRetentionDays = Math.min(Math.max(Math.floor(input.retentionDays), 1), 3650);
+  const cutoffMs = Date.now() - safeRetentionDays * 24 * 60 * 60 * 1000;
+  const store = getStore();
+  const before = store.shareLinkAuditEvents.length;
+  store.shareLinkAuditEvents = store.shareLinkAuditEvents.filter(
+    (event) => new Date(event.createdAt).getTime() >= cutoffMs,
+  );
+  return {
+    removedCount: before - store.shareLinkAuditEvents.length,
+    retentionDays: safeRetentionDays,
+  };
 }

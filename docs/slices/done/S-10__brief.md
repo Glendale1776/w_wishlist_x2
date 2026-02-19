@@ -1,4 +1,4 @@
-status: pending
+status: done
 id: S-10
 topic: brief.md
 title: Observability, abuse controls, and support docs

@@ -10,3 +10,4 @@
 - 2026-02-19 | S-07 | docs/locks/context-S-07-20260219-1613-0399f2e.lock.md | Added /l/:share_token page, token-hash public read model APIs, and realtime stream with 30s fallback polling.
 - 2026-02-19 | S-08 | docs/locks/context-S-08-20260219-1626-3d56617.lock.md | Added public reserve/contribute APIs with idempotency+rate-limit, my activity API/page, and item action modal updates.
 - 2026-02-19 | S-09 | docs/locks/context-S-09-20260219-1646-5c55b07.lock.md | Added owner share-link rotation with one-time reveal UX, immediate invalidation, and idempotent retries.
+- 2026-02-19 | S-10 | docs/locks/context-S-10-20260219-1700-c2dded6.lock.md | Added admin abuse controls, filtered audit query endpoint, metadata host-redacted failure logging, stream reconnect metrics, and retention cleanup.

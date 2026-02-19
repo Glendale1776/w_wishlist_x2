@@ -15,9 +15,12 @@ export type ItemRecord = {
   updatedAt: string;
 };
 
-type AuditEvent = {
+export type ItemAuditAction = "create" | "update" | "archive" | "reserve" | "unreserve" | "contribute";
+
+export type ItemAuditEvent = {
   id: string;
-  action: "create" | "update" | "archive" | "reserve" | "unreserve" | "contribute";
+  action: ItemAuditAction;
+  wishlistId: string;
   entityId: string;
   ownerEmail: string;
   createdAt: string;
@@ -154,7 +157,7 @@ const RATE_LIMIT_WINDOW_MS = 60_000;
 
 type ItemStore = {
   items: ItemRecord[];
-  auditEvents: AuditEvent[];
+  auditEvents: ItemAuditEvent[];
   images: StoredImage[];
   uploadTickets: UploadTicket[];
   previewTickets: PreviewTicket[];
@@ -197,11 +200,12 @@ function nowMs() {
   return Date.now();
 }
 
-function logAudit(action: AuditEvent["action"], entityId: string, ownerEmail: string) {
+function logAudit(action: ItemAuditEvent["action"], entityId: string, ownerEmail: string, wishlistId: string) {
   const store = getStore();
   store.auditEvents.unshift({
     id: randomUUID(),
     action,
+    wishlistId,
     entityId,
     ownerEmail,
     createdAt: nowIso(),
@@ -373,7 +377,7 @@ export function createItem(input: {
 
   const store = getStore();
   store.items.unshift(item);
-  logAudit("create", item.id, input.ownerEmail);
+  logAudit("create", item.id, input.ownerEmail, item.wishlistId);
 
   return {
     item,
@@ -419,7 +423,7 @@ export function updateItem(input: {
     removeImageByPath(parseStoragePath(previousImageUrl));
   }
 
-  logAudit("update", found.id, input.ownerEmail);
+  logAudit("update", found.id, input.ownerEmail, found.wishlistId);
 
   return {
     item: found,
@@ -436,7 +440,7 @@ export function archiveItem(input: { itemId: string; ownerEmail: string }) {
   if (!found.archivedAt) {
     found.archivedAt = nowIso();
     found.updatedAt = found.archivedAt;
-    logAudit("archive", found.id, input.ownerEmail);
+    logAudit("archive", found.id, input.ownerEmail, found.wishlistId);
   }
 
   return {
@@ -507,7 +511,7 @@ export function reservePublicItem(input: { wishlistId: string; itemId: string; a
   }
 
   item.updatedAt = now;
-  logAudit("reserve", item.id, input.actorEmail);
+  logAudit("reserve", item.id, input.actorEmail, item.wishlistId);
 
   return {
     reservationStatus: "active" as const,
@@ -537,7 +541,7 @@ export function unreservePublicItem(input: { wishlistId: string; itemId: string;
   actorReservation.updatedAt = nowIso();
 
   item.updatedAt = actorReservation.updatedAt;
-  logAudit("unreserve", item.id, input.actorEmail);
+  logAudit("unreserve", item.id, input.actorEmail, item.wishlistId);
 
   return {
     reservationStatus: "released" as const,
@@ -581,7 +585,7 @@ export function contributeToPublicItem(input: {
 
   store.contributions.unshift(contribution);
   item.updatedAt = contribution.createdAt;
-  logAudit("contribute", item.id, input.actorEmail);
+  logAudit("contribute", item.id, input.actorEmail, item.wishlistId);
 
   return {
     contribution,
@@ -860,7 +864,7 @@ export function uploadItemImage(input: {
 
   item.imageUrl = `${STORAGE_PREFIX}${ticket.path}`;
   item.updatedAt = nextTimestamp;
-  logAudit("update", item.id, item.ownerEmail);
+  logAudit("update", item.id, item.ownerEmail, item.wishlistId);
 
   store.uploadTickets.splice(ticketIndex, 1);
 
@@ -926,5 +930,37 @@ export function resolveItemImagePreview(input: { itemId: string; previewToken: s
   return {
     contentType: image.contentType,
     bytes: Buffer.from(image.dataBase64, "base64"),
+  };
+}
+
+export function listItemAuditEvents(input: {
+  wishlistId?: string;
+  action?: ItemAuditAction;
+  since?: string;
+  limit?: number;
+}) {
+  const store = getStore();
+  const sinceTime = input.since ? new Date(input.since).getTime() : Number.NEGATIVE_INFINITY;
+  const limit = Math.min(Math.max(input.limit ?? 200, 1), 500);
+
+  return store.auditEvents
+    .filter((event) => {
+      if (input.wishlistId && event.wishlistId !== input.wishlistId) return false;
+      if (input.action && event.action !== input.action) return false;
+      if (new Date(event.createdAt).getTime() < sinceTime) return false;
+      return true;
+    })
+    .slice(0, limit);
+}
+
+export function pruneItemAuditEvents(input: { retentionDays: number }) {
+  const safeRetentionDays = Math.min(Math.max(Math.floor(input.retentionDays), 1), 3650);
+  const cutoffMs = Date.now() - safeRetentionDays * 24 * 60 * 60 * 1000;
+  const store = getStore();
+  const before = store.auditEvents.length;
+  store.auditEvents = store.auditEvents.filter((event) => new Date(event.createdAt).getTime() >= cutoffMs);
+  return {
+    removedCount: before - store.auditEvents.length,
+    retentionDays: safeRetentionDays,
   };
 }

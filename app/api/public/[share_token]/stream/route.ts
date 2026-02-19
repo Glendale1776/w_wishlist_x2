@@ -3,6 +3,7 @@ import { NextResponse } from "next/server";
 import { resolvePublicWishlistReadModel } from "@/app/_lib/public-wishlist";
 
 const DEFAULT_STREAM_HEARTBEAT_SEC = 15;
+const DEFAULT_RECONNECT_WINDOW_SEC = 120;
 
 type ApiErrorCode = "NOT_FOUND";
 
@@ -59,6 +60,57 @@ function parseHeartbeatSeconds(raw: string | undefined) {
   return Math.min(Math.max(Math.floor(parsed), 5), 60);
 }
 
+function parseReconnectWindowSeconds(raw: string | undefined) {
+  const parsed = Number(raw);
+  if (!Number.isFinite(parsed) || parsed <= 0) return DEFAULT_RECONNECT_WINDOW_SEC;
+  return Math.min(Math.max(Math.floor(parsed), 30), 3600);
+}
+
+type StreamMetricsStore = {
+  totalConnections: number;
+  totalDisconnects: number;
+  reconnects: number;
+  lastConnectedAtByToken: Record<string, number>;
+};
+
+declare global {
+  // eslint-disable-next-line no-var
+  var __publicWishlistStreamMetrics: StreamMetricsStore | undefined;
+}
+
+function getStreamMetricsStore(): StreamMetricsStore {
+  if (!globalThis.__publicWishlistStreamMetrics) {
+    globalThis.__publicWishlistStreamMetrics = {
+      totalConnections: 0,
+      totalDisconnects: 0,
+      reconnects: 0,
+      lastConnectedAtByToken: {},
+    };
+  }
+  return globalThis.__publicWishlistStreamMetrics;
+}
+
+function tokenHint(token: string) {
+  return token.slice(0, 8);
+}
+
+function reconnectRate(metrics: StreamMetricsStore) {
+  if (metrics.totalConnections === 0) return 0;
+  return Number((metrics.reconnects / metrics.totalConnections).toFixed(3));
+}
+
+function logStreamMetric(input: {
+  event: "stream_connect" | "stream_disconnect";
+  tokenHint: string;
+  reason?: string;
+  totalConnections: number;
+  totalDisconnects: number;
+  reconnects: number;
+  reconnectRate: number;
+}) {
+  console.info("public_wishlist_stream_metric", input);
+}
+
 function encodeMessage(message: StreamMessage): Uint8Array {
   const payload = `data: ${JSON.stringify(message)}\n\n`;
   return new TextEncoder().encode(payload);
@@ -77,6 +129,8 @@ export async function GET(request: Request, context: { params: Promise<{ share_t
   }
 
   const heartbeatSec = parseHeartbeatSeconds(process.env.STREAM_HEARTBEAT_SEC);
+  const reconnectWindowSec = parseReconnectWindowSeconds(process.env.STREAM_RECONNECT_WINDOW_SEC);
+  const reconnectWindowMs = reconnectWindowSec * 1000;
   let lastVersion = "";
 
   const stream = new ReadableStream<Uint8Array>({
@@ -84,8 +138,27 @@ export async function GET(request: Request, context: { params: Promise<{ share_t
       let intervalId: ReturnType<typeof setInterval> | null = null;
       let closed = false;
       let inFlight = false;
+      const metrics = getStreamMetricsStore();
+      const now = Date.now();
+      const previousConnectedAt = metrics.lastConnectedAtByToken[share_token];
+      const reconnected = typeof previousConnectedAt === "number" && now - previousConnectedAt <= reconnectWindowMs;
 
-      const cleanup = () => {
+      metrics.totalConnections += 1;
+      if (reconnected) {
+        metrics.reconnects += 1;
+      }
+      metrics.lastConnectedAtByToken[share_token] = now;
+
+      logStreamMetric({
+        event: "stream_connect",
+        tokenHint: tokenHint(share_token),
+        totalConnections: metrics.totalConnections,
+        totalDisconnects: metrics.totalDisconnects,
+        reconnects: metrics.reconnects,
+        reconnectRate: reconnectRate(metrics),
+      });
+
+      const cleanup = (reason: string) => {
         if (closed) return;
         closed = true;
         if (intervalId) {
@@ -93,10 +166,20 @@ export async function GET(request: Request, context: { params: Promise<{ share_t
           intervalId = null;
         }
         request.signal.removeEventListener("abort", onAbort);
+        metrics.totalDisconnects += 1;
+        logStreamMetric({
+          event: "stream_disconnect",
+          tokenHint: tokenHint(share_token),
+          reason,
+          totalConnections: metrics.totalConnections,
+          totalDisconnects: metrics.totalDisconnects,
+          reconnects: metrics.reconnects,
+          reconnectRate: reconnectRate(metrics),
+        });
       };
 
       const onAbort = () => {
-        cleanup();
+        cleanup("abort");
         try {
           controller.close();
         } catch {
@@ -115,7 +198,7 @@ export async function GET(request: Request, context: { params: Promise<{ share_t
 
         if (!resolved.ok) {
           controller.enqueue(encodeMessage({ type: "not_found" }));
-          cleanup();
+          cleanup("not_found");
           try {
             controller.close();
           } catch {
@@ -152,7 +235,7 @@ export async function GET(request: Request, context: { params: Promise<{ share_t
       intervalId = setInterval(emit, heartbeatSec * 1000);
     },
     cancel() {
-      // Request abort listener handles timer cleanup.
+      // Request abort listener handles timer cleanup for most disconnects.
     },
   });
 

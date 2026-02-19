@@ -5,6 +5,7 @@ import { listWishlistRecords } from "@/app/_lib/wishlist-store";
 
 const EMAIL_REGEX = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 const URL_REGEX = /^https?:\/\//i;
+const STORAGE_URL_REGEX = /^storage:\/\//i;
 const TITLE_MAX = 120;
 
 type ApiErrorCode = "AUTH_REQUIRED" | "VALIDATION_ERROR" | "FORBIDDEN" | "NOT_FOUND" | "INTERNAL_ERROR";
@@ -51,7 +52,9 @@ function validatePayload(body: ItemPayload) {
   if (title.length > TITLE_MAX) fieldErrors.title = `Item title must be ${TITLE_MAX} chars or less.`;
 
   if (url && !URL_REGEX.test(url)) fieldErrors.url = "URL must start with http:// or https://";
-  if (imageUrl && !URL_REGEX.test(imageUrl)) fieldErrors.imageUrl = "Image URL must start with http:// or https://";
+  if (imageUrl && !URL_REGEX.test(imageUrl) && !STORAGE_URL_REGEX.test(imageUrl)) {
+    fieldErrors.imageUrl = "Image URL must start with http://, https://, or storage://";
+  }
 
   if (priceCents !== null && (!Number.isInteger(priceCents) || priceCents < 0)) {
     fieldErrors.priceCents = "Price must be a non-negative integer in cents.";

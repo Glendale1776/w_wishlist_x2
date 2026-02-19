@@ -1,4 +1,4 @@
-status: pending
+status: done
 id: S-06
 topic: brief.md
 title: Image upload limits and secure preview flow

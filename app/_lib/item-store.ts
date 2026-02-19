@@ -74,6 +74,20 @@ export type ResolvePreviewError = "INVALID_PREVIEW_TOKEN" | "NOT_FOUND";
 
 const STORAGE_PREFIX = "storage://";
 
+export type PublicItemReadModel = {
+  id: string;
+  title: string;
+  url: string | null;
+  imageUrl: string | null;
+  priceCents: number | null;
+  isGroupFunded: boolean;
+  targetCents: number | null;
+  fundedCents: number;
+  progressRatio: number;
+  availability: "available" | "reserved";
+  updatedAt: string;
+};
+
 declare global {
   // eslint-disable-next-line no-var
   var __itemStore:
@@ -291,6 +305,35 @@ export function listItemsForWishlist(input: { wishlistId: string; ownerEmail: st
   return store.items
     .filter((item) => item.wishlistId === input.wishlistId && item.ownerEmail === input.ownerEmail)
     .sort((a, b) => new Date(b.updatedAt).getTime() - new Date(a.updatedAt).getTime());
+}
+
+export function listPublicItemsForWishlist(input: { wishlistId: string }): PublicItemReadModel[] {
+  const store = getStore();
+
+  return store.items
+    .filter((item) => item.wishlistId === input.wishlistId && !item.archivedAt)
+    .sort((a, b) => new Date(b.updatedAt).getTime() - new Date(a.updatedAt).getTime())
+    .map((item) => {
+      const fundedCents = 0;
+      const ratio =
+        item.isGroupFunded && item.targetCents && item.targetCents > 0
+          ? Math.min(fundedCents, item.targetCents) / item.targetCents
+          : 0;
+
+      return {
+        id: item.id,
+        title: item.title,
+        url: item.url,
+        imageUrl: item.imageUrl && !isStorageRef(item.imageUrl) ? item.imageUrl : null,
+        priceCents: item.priceCents,
+        isGroupFunded: item.isGroupFunded,
+        targetCents: item.targetCents,
+        fundedCents,
+        progressRatio: ratio,
+        availability: "available",
+        updatedAt: item.updatedAt,
+      };
+    });
 }
 
 export function prepareItemImageUpload(input: {

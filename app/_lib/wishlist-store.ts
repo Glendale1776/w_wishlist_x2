@@ -9,6 +9,7 @@ export type WishlistRecord = {
   currency: string;
   shareTokenHash: string;
   shareTokenHint: string;
+  shareTokenDisabledAt: string | null;
   createdAt: string;
   updatedAt: string;
 };
@@ -27,17 +28,30 @@ export type WishlistSort = "updated_desc" | "title_asc";
 
 declare global {
   // eslint-disable-next-line no-var
-  var __wishlistStore: { wishlists: WishlistRecord[] } | undefined;
+  var __wishlistStore:
+    | {
+        wishlists: WishlistRecord[];
+        shareTokensByHash: Record<string, string>;
+      }
+    | undefined;
 }
 
 function getStore() {
   if (!globalThis.__wishlistStore) {
-    globalThis.__wishlistStore = { wishlists: [] };
+    globalThis.__wishlistStore = {
+      wishlists: [],
+      shareTokensByHash: {},
+    };
   }
+
+  if (!globalThis.__wishlistStore.shareTokensByHash) {
+    globalThis.__wishlistStore.shareTokensByHash = {};
+  }
+
   return globalThis.__wishlistStore;
 }
 
-function normalizeCanonicalHost(raw: string | undefined): string {
+export function normalizeCanonicalHost(raw: string | undefined): string {
   const host = raw?.trim() || "https://design.rhcargo.ru";
   return host.replace(/\/$/, "");
 }
@@ -50,7 +64,7 @@ function hashShareToken(token: string): string {
   return createHash("sha256").update(token).digest("hex");
 }
 
-function buildShareUrl(host: string, tokenOrHint: string): string {
+export function buildPublicShareUrl(host: string, tokenOrHint: string): string {
   return `${host}/l/${tokenOrHint}`;
 }
 
@@ -77,17 +91,19 @@ export function createWishlistRecord(input: {
     currency: input.currency,
     shareTokenHash: tokenHash,
     shareTokenHint: tokenHint,
+    shareTokenDisabledAt: null,
     createdAt: timestamp,
     updatedAt: timestamp,
   };
 
   const store = getStore();
   store.wishlists.unshift(record);
+  store.shareTokensByHash[tokenHash] = token;
 
   return {
     record,
-    shareUrl: buildShareUrl(canonicalHost, token),
-    shareUrlPreview: buildShareUrl(canonicalHost, tokenHint),
+    shareUrl: buildPublicShareUrl(canonicalHost, token),
+    shareUrlPreview: buildPublicShareUrl(canonicalHost, token),
   };
 }
 
@@ -114,12 +130,47 @@ export function listWishlistRecords(input: {
   }
 
   return filtered.map((item) => ({
+    // Use mapped full token when available. Falls back to hint only for legacy in-memory rows.
+    // This keeps share links functional while preserving hash-based lookup for validation.
+    shareUrlPreview: buildPublicShareUrl(
+      canonicalHost,
+      store.shareTokensByHash[item.shareTokenHash] || item.shareTokenHint,
+    ),
     id: item.id,
     title: item.title,
     occasionDate: item.occasionDate,
     occasionNote: item.occasionNote,
     currency: item.currency,
     updatedAt: item.updatedAt,
-    shareUrlPreview: buildShareUrl(canonicalHost, item.shareTokenHint),
   }));
+}
+
+export type ResolvePublicWishlistError = "NOT_FOUND" | "DISABLED";
+
+export function resolvePublicWishlistByToken(
+  token: string,
+): { wishlist: WishlistRecord } | { error: ResolvePublicWishlistError } {
+  const normalizedToken = token.trim();
+  if (!normalizedToken) {
+    return { error: "NOT_FOUND" as ResolvePublicWishlistError };
+  }
+
+  const tokenHash = hashShareToken(normalizedToken);
+  const store = getStore();
+
+  let record = store.wishlists.find((wishlist) => wishlist.shareTokenHash === tokenHash);
+
+  if (!record) {
+    record = store.wishlists.find((wishlist) => wishlist.shareTokenHint === normalizedToken);
+  }
+
+  if (!record) {
+    return { error: "NOT_FOUND" as ResolvePublicWishlistError };
+  }
+
+  if (record.shareTokenDisabledAt) {
+    return { error: "DISABLED" as ResolvePublicWishlistError };
+  }
+
+  return { wishlist: record };
 }

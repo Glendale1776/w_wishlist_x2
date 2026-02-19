@@ -1,4 +1,4 @@
-status: pending
+status: done
 id: S-07
 topic: brief.md
 title: Public share view with realtime read model

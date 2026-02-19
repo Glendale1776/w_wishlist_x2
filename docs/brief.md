@@ -58,3 +58,4 @@ Decisions:
 - [P1] Q3 [T] Stream fallback
   Problem: Realtime outage fallback unclear.
   Answer: When stream disconnects, poll every 30s and show reconnect status.
+Q1 [F] Link rotation — Add owner action to regenerate share link; invalidate old token immediately.

@@ -3,9 +3,9 @@ import { NextRequest, NextResponse } from "next/server";
 import {
   createItemImagePreview,
   prepareItemImageUpload,
-  resolveItemImagePreview,
   uploadItemImage,
 } from "@/app/_lib/item-store";
+import { getSupabaseAdminClient, getSupabaseStorageBucket } from "@/app/_lib/supabase-admin";
 
 const EMAIL_REGEX = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 const DEFAULT_MAX_UPLOAD_MB = 10;
@@ -18,7 +18,7 @@ type ApiErrorCode =
   | "FORBIDDEN"
   | "NOT_FOUND"
   | "INVALID_UPLOAD_TOKEN"
-  | "INVALID_PREVIEW_TOKEN";
+  | "INTERNAL_ERROR";
 
 type UploadUrlPayload = {
   mode?: "prepare-upload" | "preview";
@@ -72,8 +72,12 @@ function buildUploadUrl(itemId: string, uploadToken: string) {
   return `/api/items/${encodeURIComponent(itemId)}/image-upload-url?uploadToken=${encodeURIComponent(uploadToken)}`;
 }
 
-function buildPreviewUrl(itemId: string, previewToken: string) {
-  return `/api/items/${encodeURIComponent(itemId)}/image-upload-url?previewToken=${encodeURIComponent(previewToken)}`;
+async function createSignedPreviewUrl(path: string, ttlSeconds: number): Promise<string | null> {
+  const supabase = getSupabaseAdminClient();
+  const bucket = getSupabaseStorageBucket();
+  const { data, error } = await supabase.storage.from(bucket).createSignedUrl(path, ttlSeconds);
+  if (error) return null;
+  return data.signedUrl || null;
 }
 
 function mapPrepareUploadError(code: string) {
@@ -112,6 +116,9 @@ function mapUploadError(code: string) {
       sizeBytes: "Uploaded file exceeds maximum size.",
     });
   }
+  if (code === "STORAGE_UPLOAD_FAILED") {
+    return errorResponse(500, "INTERNAL_ERROR", "Unable to store image right now. Please retry.");
+  }
   return errorResponse(422, "VALIDATION_ERROR", "Uploaded file is empty or invalid.", {
     sizeBytes: "Uploaded file is empty or invalid.",
   });
@@ -139,7 +146,6 @@ export async function POST(request: NextRequest, context: { params: Promise<{ id
     const result = createItemImagePreview({
       itemId: id,
       ownerEmail,
-      ttlSeconds,
     });
 
     if ("error" in result) {
@@ -147,7 +153,7 @@ export async function POST(request: NextRequest, context: { params: Promise<{ id
       return errorResponse(403, "FORBIDDEN", "You do not have access to this item.");
     }
 
-    if (!result.previewToken) {
+    if (result.externalUrl) {
       return NextResponse.json({
         ok: true as const,
         previewUrl: result.externalUrl,
@@ -155,10 +161,23 @@ export async function POST(request: NextRequest, context: { params: Promise<{ id
       });
     }
 
+    if (result.storagePath) {
+      const signedPreviewUrl = await createSignedPreviewUrl(result.storagePath, ttlSeconds);
+      if (!signedPreviewUrl) {
+        return errorResponse(500, "INTERNAL_ERROR", "Unable to create image preview right now.");
+      }
+
+      return NextResponse.json({
+        ok: true as const,
+        previewUrl: signedPreviewUrl,
+        expiresInSec: ttlSeconds,
+      });
+    }
+
     return NextResponse.json({
       ok: true as const,
-      previewUrl: buildPreviewUrl(id, result.previewToken),
-      expiresInSec: ttlSeconds,
+      previewUrl: null,
+      expiresInSec: null,
     });
   }
 
@@ -200,13 +219,12 @@ export async function POST(request: NextRequest, context: { params: Promise<{ id
   });
 }
 
-export async function PUT(request: NextRequest, context: { params: Promise<{ id: string }> }) {
+export async function PUT(request: NextRequest) {
   const ownerEmail = ownerEmailFromHeader(request);
   if (!ownerEmail) {
     return errorResponse(401, "AUTH_REQUIRED", "Sign in is required to upload images.");
   }
 
-  const { id } = await context.params;
   const uploadToken = request.nextUrl.searchParams.get("uploadToken") || "";
 
   if (!uploadToken) {
@@ -225,54 +243,24 @@ export async function PUT(request: NextRequest, context: { params: Promise<{ id:
 
   const bytes = new Uint8Array(await request.arrayBuffer());
 
-  const result = uploadItemImage({
+  const result = await uploadItemImage({
     uploadToken,
     ownerEmail,
     mimeType,
     fileBytes: bytes,
-    ttlSeconds: signedUrlTtlSeconds(),
   });
 
   if ("error" in result) {
     return mapUploadError(result.error || "INVALID_SIZE");
   }
 
+  const ttlSeconds = signedUrlTtlSeconds();
+  const previewUrl = await createSignedPreviewUrl(result.storagePath, ttlSeconds);
+
   return NextResponse.json({
     ok: true as const,
     item: result.item,
-    previewUrl: buildPreviewUrl(id, result.previewToken),
-    expiresInSec: signedUrlTtlSeconds(),
-  });
-}
-
-export async function GET(request: NextRequest, context: { params: Promise<{ id: string }> }) {
-  const { id } = await context.params;
-  const previewToken = request.nextUrl.searchParams.get("previewToken") || "";
-
-  if (!previewToken) {
-    return errorResponse(422, "VALIDATION_ERROR", "Preview token is required.", {
-      previewToken: "Preview token is required.",
-    });
-  }
-
-  const resolved = resolveItemImagePreview({
-    itemId: id,
-    previewToken,
-  });
-
-  if ("error" in resolved) {
-    if (resolved.error === "NOT_FOUND") {
-      return errorResponse(404, "NOT_FOUND", "Image not found.");
-    }
-    return errorResponse(410, "INVALID_PREVIEW_TOKEN", "Preview URL expired. Refresh and try again.");
-  }
-
-  return new NextResponse(resolved.bytes, {
-    status: 200,
-    headers: {
-      "content-type": resolved.contentType,
-      "cache-control": "private, no-store, max-age=0",
-      "content-length": String(resolved.bytes.byteLength),
-    },
+    previewUrl,
+    expiresInSec: previewUrl ? ttlSeconds : null,
   });
 }

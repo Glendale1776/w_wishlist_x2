@@ -128,15 +128,25 @@ export default function AdminAbusePage() {
   }, [wishlistStatus]);
 
   useEffect(() => {
-    const adminEmail = getAuthenticatedEmail();
-    if (!adminEmail) {
-      persistReturnTo("/admin/abuse");
-      router.replace("/login?returnTo=%2Fadmin%2Fabuse");
+    let cancelled = false;
+
+    async function ensureAuth() {
+      const adminEmail = await getAuthenticatedEmail();
+      if (!cancelled && !adminEmail) {
+        persistReturnTo("/admin/abuse");
+        router.replace("/login?returnTo=%2Fadmin%2Fabuse");
+      }
     }
+
+    void ensureAuth();
+
+    return () => {
+      cancelled = true;
+    };
   }, [router]);
 
   async function fetchAudit() {
-    const adminEmail = getAuthenticatedEmail();
+    const adminEmail = await getAuthenticatedEmail();
     if (!adminEmail) return;
 
     setIsLoading(true);
@@ -184,7 +194,7 @@ export default function AdminAbusePage() {
   }
 
   async function applyModerationAction(mode: "disable" | "enable") {
-    const adminEmail = getAuthenticatedEmail();
+    const adminEmail = await getAuthenticatedEmail();
     if (!adminEmail) return;
 
     const nextWishlistId = wishlistId.trim();

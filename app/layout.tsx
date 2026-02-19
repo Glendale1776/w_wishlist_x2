@@ -1,8 +1,10 @@
 import type { Metadata } from "next";
 import "./globals.css";
 
+import { GlobalHeader } from "@/app/_components/global-header";
+
 export const metadata: Metadata = {
-  title: "W Wish List",
+  title: "I WISH ...",
   description: "Wishlist app foundation",
 };
 
@@ -11,7 +13,10 @@ export default function RootLayout({
 }: Readonly<{ children: React.ReactNode }>) {
   return (
     <html lang="en">
-      <body>{children}</body>
+      <body>
+        <GlobalHeader />
+        <div className="pt-16 sm:pt-[72px]">{children}</div>
+      </body>
     </html>
   );
 }

@@ -1,5 +1,7 @@
 import { createHash, randomUUID } from "node:crypto";
 
+import { getSupabaseAdminClient, getSupabaseStorageBucket } from "@/app/_lib/supabase-admin";
+
 export type ItemRecord = {
   id: string;
   wishlistId: string;
@@ -104,7 +106,8 @@ export type UploadItemImageError =
   | "ARCHIVED"
   | "INVALID_MIME"
   | "FILE_TOO_LARGE"
-  | "INVALID_SIZE";
+  | "INVALID_SIZE"
+  | "STORAGE_UPLOAD_FAILED";
 
 export type CreatePreviewError = "NOT_FOUND" | "FORBIDDEN";
 export type ResolvePreviewError = "INVALID_PREVIEW_TOKEN" | "NOT_FOUND";
@@ -238,6 +241,14 @@ function removeImageByPath(path: string) {
   const store = getStore();
   store.images = store.images.filter((image) => image.path !== path);
   store.previewTickets = store.previewTickets.filter((ticket) => ticket.path !== path);
+
+  try {
+    const supabase = getSupabaseAdminClient();
+    const bucket = getSupabaseStorageBucket();
+    void supabase.storage.from(bucket).remove([path]);
+  } catch {
+    // Ignore storage cleanup failures and avoid impacting core item flows.
+  }
 }
 
 function pruneExpiredTickets(now = nowMs()) {
@@ -787,12 +798,11 @@ export function prepareItemImageUpload(input: {
   };
 }
 
-export function uploadItemImage(input: {
+export async function uploadItemImage(input: {
   uploadToken: string;
   ownerEmail: string;
   mimeType: string;
   fileBytes: Uint8Array;
-  ttlSeconds: number;
 }) {
   pruneExpiredTickets();
 
@@ -835,26 +845,18 @@ export function uploadItemImage(input: {
     return { error: "ARCHIVED" as UploadItemImageError };
   }
 
-  const existingImageIndex = store.images.findIndex((image) => image.path === ticket.path);
-  const nextTimestamp = nowIso();
-  const nextImage: StoredImage = {
-    path: ticket.path,
-    itemId: item.id,
-    wishlistId: item.wishlistId,
-    ownerEmail: item.ownerEmail,
-    contentType: normalizedMime,
-    sizeBytes,
-    dataBase64: Buffer.from(input.fileBytes).toString("base64"),
-    createdAt: existingImageIndex === -1 ? nextTimestamp : store.images[existingImageIndex].createdAt,
-    updatedAt: nextTimestamp,
-  };
+  const supabase = getSupabaseAdminClient();
+  const bucket = getSupabaseStorageBucket();
 
-  if (existingImageIndex === -1) {
-    store.images.unshift(nextImage);
-  } else {
-    store.images[existingImageIndex] = nextImage;
+  const { error: uploadError } = await supabase.storage.from(bucket).upload(ticket.path, input.fileBytes, {
+    contentType: normalizedMime,
+    upsert: true,
+  });
+  if (uploadError) {
+    return { error: "STORAGE_UPLOAD_FAILED" as UploadItemImageError };
   }
 
+  const previousStoragePath = item.imageUrl && isStorageRef(item.imageUrl) ? parseStoragePath(item.imageUrl) : null;
   if (item.imageUrl && isStorageRef(item.imageUrl)) {
     const previousPath = parseStoragePath(item.imageUrl);
     if (previousPath !== ticket.path) {
@@ -862,21 +864,21 @@ export function uploadItemImage(input: {
     }
   }
 
+  const nextTimestamp = nowIso();
   item.imageUrl = `${STORAGE_PREFIX}${ticket.path}`;
   item.updatedAt = nextTimestamp;
   logAudit("update", item.id, item.ownerEmail, item.wishlistId);
 
   store.uploadTickets.splice(ticketIndex, 1);
 
-  const previewToken = createPreviewTicket(item.id, ticket.path, input.ttlSeconds);
-
   return {
     item,
-    previewToken,
+    storagePath: ticket.path,
+    previousStoragePath,
   };
 }
 
-export function createItemImagePreview(input: { itemId: string; ownerEmail: string; ttlSeconds: number }) {
+export function createItemImagePreview(input: { itemId: string; ownerEmail: string }) {
   const store = getStore();
   const item = store.items.find((candidate) => candidate.id === input.itemId);
 
@@ -888,27 +890,23 @@ export function createItemImagePreview(input: { itemId: string; ownerEmail: stri
   }
 
   if (!item.imageUrl) {
-    return { previewToken: null as string | null, externalUrl: null as string | null };
+    return {
+      externalUrl: null as string | null,
+      storagePath: null as string | null,
+    };
   }
 
   if (!isStorageRef(item.imageUrl)) {
     return {
-      previewToken: null as string | null,
       externalUrl: item.imageUrl,
+      storagePath: null as string | null,
     };
   }
 
   const path = parseStoragePath(item.imageUrl);
-  const image = store.images.find((candidate) => candidate.path === path);
-  if (!image) {
-    return { previewToken: null as string | null, externalUrl: null as string | null };
-  }
-
-  const previewToken = createPreviewTicket(item.id, path, input.ttlSeconds);
-
   return {
-    previewToken,
     externalUrl: null as string | null,
+    storagePath: path,
   };
 }
 

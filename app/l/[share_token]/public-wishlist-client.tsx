@@ -153,6 +153,7 @@ export default function PublicWishlistClient({ shareToken }: { shareToken: strin
   const [isMutating, setIsMutating] = useState(false);
   const [actionError, setActionError] = useState<string | null>(null);
   const [actionSuccess, setActionSuccess] = useState<string | null>(null);
+  const [authEmail, setAuthEmail] = useState<string | null>(null);
 
   const applyModel = useCallback((nextModel: PublicWishlistModel, preserveScroll: boolean) => {
     if (!preserveScroll || typeof window === "undefined") {
@@ -201,6 +202,21 @@ export default function PublicWishlistClient({ shareToken }: { shareToken: strin
     },
     [router, shareToken],
   );
+
+  useEffect(() => {
+    let cancelled = false;
+
+    async function hydrateAuth() {
+      const email = await getAuthenticatedEmail();
+      if (!cancelled) setAuthEmail(email);
+    }
+
+    void hydrateAuth();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [activeItemId, shareToken]);
 
   useEffect(() => {
     let cancelled = false;
@@ -382,11 +398,13 @@ export default function PublicWishlistClient({ shareToken }: { shareToken: strin
   async function reserveAction(action: "reserve" | "unreserve") {
     if (!activeItem) return;
 
-    const actorEmail = getAuthenticatedEmail();
+    const actorEmail = await getAuthenticatedEmail();
     if (!actorEmail) {
+      setAuthEmail(null);
       redirectToLoginForItem(activeItem.id);
       return;
     }
+    setAuthEmail(actorEmail);
 
     setIsMutating(true);
     setActionError(null);
@@ -428,11 +446,13 @@ export default function PublicWishlistClient({ shareToken }: { shareToken: strin
   async function contributeAction() {
     if (!activeItem) return;
 
-    const actorEmail = getAuthenticatedEmail();
+    const actorEmail = await getAuthenticatedEmail();
     if (!actorEmail) {
+      setAuthEmail(null);
       redirectToLoginForItem(activeItem.id);
       return;
     }
+    setAuthEmail(actorEmail);
 
     const amountCents = parseContributionToCents(contributionInput);
     if (!Number.isInteger(amountCents) || amountCents < 100) {
@@ -739,7 +759,7 @@ export default function PublicWishlistClient({ shareToken }: { shareToken: strin
             {actionError ? <p className="mt-3 text-sm text-rose-700">{actionError}</p> : null}
             {actionSuccess ? <p className="mt-3 text-sm text-emerald-700">{actionSuccess}</p> : null}
 
-            {!getAuthenticatedEmail() ? (
+            {!authEmail ? (
               <div className="mt-3 rounded-md border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-900">
                 Sign in to reserve or contribute. Your return to this item is preserved.
                 <div className="mt-2">

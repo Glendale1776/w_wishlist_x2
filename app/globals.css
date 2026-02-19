@@ -5,5 +5,69 @@
 }
 
 body {
-  @apply bg-zinc-50 text-zinc-900 antialiased;
+  @apply text-zinc-900 antialiased;
+  background-color: #eaf4ff;
+  font-family: "Helvetica Neue", Helvetica, Arial, sans-serif;
+}
+
+.btn-notch {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border: 1px solid #9ca3af;
+  background: rgba(255, 255, 255, 0.9);
+  color: #1f2937;
+  padding: 0.5rem 1rem;
+  min-height: 2.4rem;
+  font-size: 0.92rem;
+  font-weight: 650;
+  line-height: 1;
+  letter-spacing: 0.01em;
+  text-decoration: none;
+  clip-path: polygon(10px 0, calc(100% - 10px) 0, 100% 50%, calc(100% - 10px) 100%, 10px 100%, 0 50%);
+  box-shadow: 3px 3px 0 rgba(15, 23, 42, 0.24);
+  transition: transform 120ms ease, box-shadow 120ms ease, filter 120ms ease;
+}
+
+.btn-notch:hover {
+  transform: translate(-1px, -1px);
+  box-shadow: 4px 4px 0 rgba(15, 23, 42, 0.24);
+  filter: saturate(1.08);
+}
+
+.btn-notch:active {
+  transform: translate(0, 0);
+  box-shadow: 1px 1px 0 rgba(15, 23, 42, 0.24);
+}
+
+.btn-notch:focus-visible {
+  outline: 2px solid #111827;
+  outline-offset: 2px;
+}
+
+.btn-notch:disabled,
+.btn-notch[aria-disabled="true"] {
+  opacity: 0.6;
+  pointer-events: none;
+}
+
+.btn-notch--ink {
+  border-color: #111827;
+  background: #111827;
+  color: #ffffff;
+  box-shadow: 3px 3px 0 rgba(17, 24, 39, 0.34);
+}
+
+.btn-notch--rose {
+  border-color: #fda4af;
+  background: #fff1f2;
+  color: #be123c;
+  box-shadow: 3px 3px 0 rgba(244, 63, 94, 0.2);
+}
+
+.btn-notch--gradient {
+  border-color: #7c3aed;
+  background: linear-gradient(90deg, #7c3aed 0%, #06b6d4 50%, #f97316 100%);
+  color: #ffffff;
+  box-shadow: 3px 3px 0 rgba(124, 58, 237, 0.34);
 }

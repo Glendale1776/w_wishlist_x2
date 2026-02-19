@@ -279,7 +279,7 @@ export default function WishlistEditorPage() {
     let cancelled = false;
 
     async function loadItems() {
-      const ownerEmail = getAuthenticatedEmail();
+      const ownerEmail = await getAuthenticatedEmail();
       if (!ownerEmail) {
         persistReturnTo(`/wishlists/${wishlistId}`);
         router.replace(`/login?returnTo=${encodeURIComponent(`/wishlists/${wishlistId}`)}`);
@@ -356,7 +356,7 @@ export default function WishlistEditorPage() {
     let cancelled = false;
 
     async function hydratePreviews() {
-      const ownerEmail = getAuthenticatedEmail();
+      const ownerEmail = await getAuthenticatedEmail();
       if (!ownerEmail || items.length === 0) {
         if (!cancelled) setImagePreviewByItemId({});
         return;
@@ -437,7 +437,7 @@ export default function WishlistEditorPage() {
   }
 
   async function hydratePreviewForItem(itemId: string) {
-    const ownerEmail = getAuthenticatedEmail();
+    const ownerEmail = await getAuthenticatedEmail();
     if (!ownerEmail) return;
 
     try {
@@ -546,7 +546,7 @@ export default function WishlistEditorPage() {
   }
 
   async function uploadImageForItem(itemId: string, file: File) {
-    const ownerEmail = getAuthenticatedEmail();
+    const ownerEmail = await getAuthenticatedEmail();
     if (!ownerEmail) {
       persistReturnTo(`/wishlists/${wishlistId}`);
       router.replace(`/login?returnTo=${encodeURIComponent(`/wishlists/${wishlistId}`)}`);
@@ -638,7 +638,7 @@ export default function WishlistEditorPage() {
     setMetadataMessage(null);
     setFieldErrors((current) => ({ ...current, imageFile: undefined }));
 
-    const ownerEmail = getAuthenticatedEmail();
+    const ownerEmail = await getAuthenticatedEmail();
     if (!ownerEmail) {
       persistReturnTo(`/wishlists/${wishlistId}`);
       router.replace(`/login?returnTo=${encodeURIComponent(`/wishlists/${wishlistId}`)}`);
@@ -737,7 +737,7 @@ export default function WishlistEditorPage() {
   }
 
   async function onArchive(itemId: string) {
-    const ownerEmail = getAuthenticatedEmail();
+    const ownerEmail = await getAuthenticatedEmail();
     if (!ownerEmail) {
       persistReturnTo(`/wishlists/${wishlistId}`);
       router.replace(`/login?returnTo=${encodeURIComponent(`/wishlists/${wishlistId}`)}`);
@@ -779,7 +779,7 @@ export default function WishlistEditorPage() {
   }
 
   async function onRotateShareLink() {
-    const ownerEmail = getAuthenticatedEmail();
+    const ownerEmail = await getAuthenticatedEmail();
     if (!ownerEmail) {
       persistReturnTo(`/wishlists/${wishlistId}`);
       router.replace(`/login?returnTo=${encodeURIComponent(`/wishlists/${wishlistId}`)}`);
@@ -828,7 +828,7 @@ export default function WishlistEditorPage() {
   async function onAutofillFromUrl() {
     setMetadataMessage(null);
 
-    const ownerEmail = getAuthenticatedEmail();
+    const ownerEmail = await getAuthenticatedEmail();
     if (!ownerEmail) {
       persistReturnTo(`/wishlists/${wishlistId}`);
       router.replace(`/login?returnTo=${encodeURIComponent(`/wishlists/${wishlistId}`)}`);
@@ -910,7 +910,7 @@ export default function WishlistEditorPage() {
       return;
     }
 
-    const ownerEmail = getAuthenticatedEmail();
+    const ownerEmail = await getAuthenticatedEmail();
     if (!ownerEmail) {
       persistReturnTo(`/wishlists/${wishlistId}`);
       router.replace(`/login?returnTo=${encodeURIComponent(`/wishlists/${wishlistId}`)}`);

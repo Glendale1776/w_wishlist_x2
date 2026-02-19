@@ -55,7 +55,7 @@ export default function OnboardingPage() {
       return;
     }
 
-    const ownerEmail = getAuthenticatedEmail();
+    const ownerEmail = await getAuthenticatedEmail();
     if (!ownerEmail) {
       persistReturnTo("/onboarding");
       router.push("/login?returnTo=/onboarding");

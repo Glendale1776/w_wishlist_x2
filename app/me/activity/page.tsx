@@ -61,7 +61,7 @@ export default function ActivityPage() {
     let cancelled = false;
 
     async function run() {
-      const actorEmail = getAuthenticatedEmail();
+      const actorEmail = await getAuthenticatedEmail();
       if (!actorEmail) {
         persistReturnTo("/me/activity");
         router.replace("/login?returnTo=%2Fme%2Factivity");

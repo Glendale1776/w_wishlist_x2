@@ -1,0 +1,62 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="360" viewBox="0 0 1200 360" role="img" aria-label="I WISH ...">
+  <defs>
+    <linearGradient id="gText" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#7C3AED"/>
+      <stop offset="0.5" stop-color="#06B6D4"/>
+      <stop offset="1" stop-color="#F97316"/>
+    </linearGradient>
+    <filter id="softShadow" x="-20%" y="-20%" width="140%" height="140%">
+      <feDropShadow dx="0" dy="8" stdDeviation="10" flood-color="#000" flood-opacity="0.18"/>
+    </filter>
+    <filter id="glow" x="-30%" y="-30%" width="160%" height="160%">
+      <feGaussianBlur stdDeviation="3" result="b"/>
+      <feMerge>
+        <feMergeNode in="b"/>
+        <feMergeNode in="SourceGraphic"/>
+      </feMerge>
+    </filter>
+    <style>
+      .txt{font-family: "Helvetica Neue", Helvetica, Arial, sans-serif;font-weight:800;letter-spacing:0.06em}
+      .spark{filter:url(#glow)}
+      .conf{opacity:.95}
+    </style>
+  </defs>
+
+  <g class="conf">
+    <circle cx="86" cy="78" r="10" fill="#22C55E"/>
+    <circle cx="140" cy="44" r="7" fill="#F59E0B"/>
+    <rect x="92" y="140" width="18" height="18" rx="4" fill="#38BDF8" transform="rotate(18 101 149)"/>
+    <path d="M58 118l18-10 10 18-18 10z" fill="#FB7185" transform="rotate(-12 72 126)"/>
+    <path d="M164 118l16-12 12 16-16 12z" fill="#A78BFA" transform="rotate(22 176 126)"/>
+    <path d="M120 108l10-18 18 10-10 18z" fill="#F97316" transform="rotate(-18 129 108)"/>
+  </g>
+
+  <g class="conf">
+    <circle cx="1104" cy="92" r="10" fill="#38BDF8"/>
+    <circle cx="1048" cy="56" r="7" fill="#FB7185"/>
+    <rect x="1086" y="150" width="18" height="18" rx="4" fill="#22C55E" transform="rotate(-14 1095 159)"/>
+    <path d="M1128 128l18-10 10 18-18 10z" fill="#F59E0B" transform="rotate(10 1142 136)"/>
+    <path d="M1034 130l16-12 12 16-16 12z" fill="#A78BFA" transform="rotate(-22 1046 138)"/>
+  </g>
+
+  <g class="spark" opacity="0.95">
+    <path d="M260 70l8 20 20 8-20 8-8 20-8-20-20-8 20-8z" fill="#FDE047"/>
+    <path d="M940 68l7 17 17 7-17 7-7 17-7-17-17-7 17-7z" fill="#FDE047"/>
+    <path d="M986 230l6 15 15 6-15 6-6 15-6-15-15-6 15-6z" fill="#FDE047"/>
+  </g>
+
+  <path d="M220 248c110 52 210 70 380 70s270-18 380-70"
+        fill="none" stroke="url(#gText)" stroke-width="18" stroke-linecap="round" opacity="0.55"/>
+
+  <g filter="url(#softShadow)">
+    <text x="600" y="210" text-anchor="middle" class="txt" font-size="132" fill="url(#gText)">
+      I WISH ...
+    </text>
+  </g>
+
+  <text x="600" y="286" text-anchor="middle"
+        font-family="'Helvetica Neue', Helvetica, Arial, sans-serif"
+        font-weight="600" font-size="26" fill="#0F172A" opacity="0.65" letter-spacing="0.04em">
+    Wish List
+  </text>
+</svg>

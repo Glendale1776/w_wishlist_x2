@@ -54,7 +54,7 @@ function WishlistsContent() {
     async function run() {
       const query = createWishlistsQuery(search, sort);
       const returnTo = query ? `/wishlists?${query}` : "/wishlists";
-      const ownerEmail = getAuthenticatedEmail();
+      const ownerEmail = await getAuthenticatedEmail();
 
       if (!ownerEmail) {
         persistReturnTo(returnTo);
@@ -149,16 +149,13 @@ function WishlistsContent() {
         </div>
       ) : null}
 
-      <header className="rounded-2xl border border-zinc-200 bg-white p-5 shadow-sm sm:p-6">
+      <header className="px-2 pb-4 sm:px-3 sm:pb-5">
         <div className="flex flex-wrap items-center justify-between gap-3">
           <div>
             <h1 className="text-2xl font-semibold tracking-tight">My wishlists</h1>
             <p className="mt-1 text-sm text-zinc-600">Search, sort, and share your wishlist links quickly.</p>
           </div>
-          <Link
-            className="inline-flex items-center rounded-md bg-zinc-900 px-4 py-2 text-sm font-medium text-white"
-            href="/onboarding"
-          >
+          <Link className="btn-notch btn-notch--ink" href="/onboarding">
             Create wishlist
           </Link>
         </div>
@@ -198,7 +195,7 @@ function WishlistsContent() {
           <div className="rounded-xl border border-rose-200 bg-rose-50 p-5 text-sm text-rose-900">
             <p>{loadError}</p>
             <button
-              className="mt-3 rounded-md border border-rose-300 px-3 py-2 text-xs font-medium"
+              className="btn-notch btn-notch--rose mt-3 text-xs"
               onClick={() => router.refresh()}
               type="button"
             >
@@ -209,16 +206,13 @@ function WishlistsContent() {
           <div className="rounded-xl border border-dashed border-zinc-300 bg-white p-6 text-center">
             <h2 className="text-base font-semibold text-zinc-900">No wishlists yet</h2>
             <p className="mt-2 text-sm text-zinc-600">Start a new wishlist to copy and share your first public link.</p>
-            <Link
-              className="mt-4 inline-flex items-center rounded-md bg-zinc-900 px-4 py-2 text-sm font-medium text-white"
-              href="/onboarding"
-            >
+            <Link className="btn-notch btn-notch--ink mt-4" href="/onboarding">
               Start onboarding
             </Link>
           </div>
         ) : (
           list.map((item) => (
-            <article className="rounded-xl border border-zinc-200 bg-white p-4 shadow-sm" key={item.id}>
+            <article className="border-b border-zinc-300/80 px-2 pb-5 pt-2 last:border-b-0 sm:px-3" key={item.id}>
               <div className="flex flex-wrap items-start justify-between gap-3">
                 <div>
                   <h2 className="text-base font-semibold text-zinc-900">{item.title}</h2>
@@ -230,14 +224,11 @@ function WishlistsContent() {
               </div>
 
               <div className="mt-4 flex flex-wrap items-center gap-2">
-                <Link
-                  className="inline-flex items-center rounded-md border border-zinc-300 px-3 py-2 text-sm font-medium text-zinc-800"
-                  href={`/wishlists/${item.id}`}
-                >
+                <Link className="btn-notch" href={`/wishlists/${item.id}`}>
                   Open editor
                 </Link>
                 <button
-                  className="inline-flex items-center rounded-md bg-zinc-900 px-3 py-2 text-sm font-medium text-white"
+                  className="btn-notch btn-notch--ink"
                   onClick={() => copyShareLink(item.shareUrlPreview)}
                   type="button"
                 >

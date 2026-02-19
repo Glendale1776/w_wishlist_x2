@@ -1,8 +1,11 @@
 "use client";
 
+import { getSupabaseBrowserClient } from "@/app/_lib/supabase-client";
+
 export type AuthActionResult = {
   ok: boolean;
   message?: string;
+  requiresEmailConfirmation?: boolean;
 };
 
 export type AuthFieldErrors = {
@@ -11,7 +14,6 @@ export type AuthFieldErrors = {
 };
 
 const RETURN_TO_KEY = "w_wishlist:return_to";
-const AUTH_KEY = "w_wishlist:mock_auth";
 const EMAIL_REGEX = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 const PASSWORD_MIN_LENGTH = 8;
 
@@ -62,19 +64,29 @@ export function validateAuthFields(email: string, password: string): AuthFieldEr
   };
 }
 
-export function isAuthenticated(): boolean {
-  if (typeof window === "undefined") return false;
-  return Boolean(window.localStorage.getItem(AUTH_KEY));
+function normalizeSupabaseErrorMessage(message: string | undefined, fallback: string): string {
+  const normalized = (message || "").toLowerCase();
+  if (!normalized) return fallback;
+  if (normalized.includes("invalid login credentials")) return "Email or password is incorrect.";
+  if (normalized.includes("email not confirmed")) return "Check your email to confirm your account before signing in.";
+  if (normalized.includes("user already registered")) return "An account with this email already exists.";
+  return fallback;
 }
 
-export function getAuthenticatedEmail(): string | null {
+export async function isAuthenticated(): Promise<boolean> {
+  const email = await getAuthenticatedEmail();
+  return Boolean(email);
+}
+
+export async function getAuthenticatedEmail(): Promise<string | null> {
   if (typeof window === "undefined") return null;
-  const raw = window.localStorage.getItem(AUTH_KEY);
-  if (!raw) return null;
 
   try {
-    const parsed = JSON.parse(raw) as { email?: string };
-    const email = parsed.email?.trim().toLowerCase() ?? "";
+    const supabase = getSupabaseBrowserClient();
+    const { data, error } = await supabase.auth.getSession();
+    if (error) return null;
+
+    const email = data.session?.user?.email?.trim().toLowerCase() ?? "";
     if (!EMAIL_REGEX.test(email)) return null;
     return email;
   } catch {
@@ -82,48 +94,98 @@ export function getAuthenticatedEmail(): string | null {
   }
 }
 
-function sleep(ms: number): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, ms));
+export async function signOut(): Promise<void> {
+  if (typeof window === "undefined") return;
+
+  try {
+    const supabase = getSupabaseBrowserClient();
+    await supabase.auth.signOut();
+  } finally {
+    window.sessionStorage.removeItem(RETURN_TO_KEY);
+  }
 }
 
 export async function mockSignIn(email: string, password: string): Promise<AuthActionResult> {
-  await sleep(450);
   const fieldErrors = validateAuthFields(email, password);
   if (fieldErrors.email || fieldErrors.password) {
     return { ok: false, message: "Please fix the field errors and try again." };
   }
-  if (email.toLowerCase().endsWith("@error.test")) {
+
+  try {
+    const supabase = getSupabaseBrowserClient();
+    const { error } = await supabase.auth.signInWithPassword({
+      email: email.trim().toLowerCase(),
+      password,
+    });
+
+    if (error) {
+      return {
+        ok: false,
+        message: normalizeSupabaseErrorMessage(error.message, "Unable to sign in right now. Please try again."),
+      };
+    }
+
+    return { ok: true };
+  } catch {
     return { ok: false, message: "Unable to sign in right now. Please try again." };
   }
-  if (typeof window !== "undefined") {
-    window.localStorage.setItem(AUTH_KEY, JSON.stringify({ email: email.trim().toLowerCase() }));
-  }
-  return { ok: true };
 }
 
 export async function mockSignUp(email: string, password: string): Promise<AuthActionResult> {
-  await sleep(450);
   const fieldErrors = validateAuthFields(email, password);
   if (fieldErrors.email || fieldErrors.password) {
     return { ok: false, message: "Please fix the field errors and try again." };
   }
-  if (email.toLowerCase().endsWith("@error.test")) {
+
+  try {
+    const supabase = getSupabaseBrowserClient();
+    const { data, error } = await supabase.auth.signUp({
+      email: email.trim().toLowerCase(),
+      password,
+    });
+
+    if (error) {
+      return {
+        ok: false,
+        message: normalizeSupabaseErrorMessage(error.message, "Unable to create account right now. Please try again."),
+      };
+    }
+
+    if (!data.session) {
+      return {
+        ok: true,
+        requiresEmailConfirmation: true,
+        message: "Check your email to confirm your account before signing in.",
+      };
+    }
+
+    return { ok: true };
+  } catch {
     return { ok: false, message: "Unable to create account right now. Please try again." };
   }
-  if (typeof window !== "undefined") {
-    window.localStorage.setItem(AUTH_KEY, JSON.stringify({ email: email.trim().toLowerCase() }));
-  }
-  return { ok: true };
 }
 
 export async function mockRequestReset(email: string): Promise<AuthActionResult> {
-  await sleep(450);
   const emailError = validateEmail(email);
   if (emailError) {
     return { ok: false, message: "Enter a valid email address first." };
   }
-  if (email.toLowerCase().endsWith("@error.test")) {
+
+  try {
+    const supabase = getSupabaseBrowserClient();
+    const redirectTo = typeof window !== "undefined" ? `${window.location.origin}/login` : undefined;
+    const { error } = await supabase.auth.resetPasswordForEmail(email.trim().toLowerCase(), {
+      redirectTo,
+    });
+    if (error) {
+      return {
+        ok: false,
+        message: normalizeSupabaseErrorMessage(error.message, "Unable to send reset email right now. Please retry."),
+      };
+    }
+
+    return { ok: true };
+  } catch {
     return { ok: false, message: "Unable to send reset email right now. Please retry." };
   }
-  return { ok: true };
 }

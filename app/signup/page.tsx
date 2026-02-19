@@ -33,7 +33,20 @@ function SignupContent() {
   }, [returnTo]);
 
   useEffect(() => {
-    if (isAuthenticated()) router.replace("/wishlists");
+    let cancelled = false;
+
+    async function redirectIfAuthenticated() {
+      const authenticated = await isAuthenticated();
+      if (!cancelled && authenticated) {
+        router.replace("/wishlists");
+      }
+    }
+
+    void redirectIfAuthenticated();
+
+    return () => {
+      cancelled = true;
+    };
   }, [router]);
 
   async function onSubmit(event: FormEvent<HTMLFormElement>) {
@@ -50,6 +63,11 @@ function SignupContent() {
 
     if (!result.ok) {
       setToast(result.message ?? "Unable to create your account. Please retry.");
+      return;
+    }
+
+    if (result.requiresEmailConfirmation) {
+      setToast(result.message ?? "Check your email to confirm your account.");
       return;
     }
 

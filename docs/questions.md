@@ -1,7 +1,6 @@
 # Questions (index)
 
 Open P0:
-- Q1 [F] Link rotation — Owner token reset flow unspecified.
 
 Open P1:
 - Q2 [T] Audit retention — Retention duration not formally defined.

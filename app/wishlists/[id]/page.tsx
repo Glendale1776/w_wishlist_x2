@@ -82,6 +82,40 @@ type ImagePreviewResponse =
       };
     };
 
+type WishlistsListResponse =
+  | {
+      ok: true;
+      wishlists: Array<{
+        id: string;
+        shareUrlPreview: string;
+      }>;
+    }
+  | {
+      ok: false;
+      error: {
+        code: string;
+        message: string;
+      };
+    };
+
+type RotateShareLinkResponse =
+  | {
+      ok: true;
+      alreadyProcessed: boolean;
+      rotatedAt: string | null;
+      shareUrl: string | null;
+      shareUrlPreview: string | null;
+      auditEventId?: string;
+    }
+  | {
+      ok: false;
+      error: {
+        code: string;
+        message: string;
+        fieldErrors?: Record<string, string>;
+      };
+    };
+
 const EMPTY_FORM: ItemFormValues = {
   title: "",
   url: "",
@@ -121,6 +155,13 @@ function buildPayload(wishlistId: string, form: ItemFormValues) {
     isGroupFunded: form.isGroupFunded,
     targetCents,
   };
+}
+
+function createIdempotencyKey() {
+  if (typeof crypto !== "undefined" && typeof crypto.randomUUID === "function") {
+    return crypto.randomUUID();
+  }
+  return `${Date.now()}-${Math.random().toString(36).slice(2)}`;
 }
 
 function isStorageImageRef(value: string | null | undefined) {
@@ -191,6 +232,11 @@ export default function WishlistEditorPage() {
   const [items, setItems] = useState<ItemRecord[]>([]);
   const [isLoading, setIsLoading] = useState(true);
   const [loadError, setLoadError] = useState<string | null>(null);
+  const [shareUrlPreview, setShareUrlPreview] = useState<string | null>(null);
+  const [oneTimeShareUrl, setOneTimeShareUrl] = useState<string | null>(null);
+  const [isRotatingShareLink, setIsRotatingShareLink] = useState(false);
+  const [rotateShareLinkError, setRotateShareLinkError] = useState<string | null>(null);
+  const [rotateShareLinkSuccess, setRotateShareLinkSuccess] = useState<string | null>(null);
 
   const [editingItemId, setEditingItemId] = useState<string | null>(null);
   const [form, setForm] = useState<ItemFormValues>(EMPTY_FORM);
@@ -260,14 +306,39 @@ export default function WishlistEditorPage() {
           const message = payload && !payload.ok ? payload.error.message : "Unable to load items.";
           setLoadError(message);
           setItems([]);
+          setShareUrlPreview(null);
           return;
         }
 
         setItems(payload.items);
+
+        try {
+          const wishlistsResponse = await fetch("/api/wishlists", {
+            headers: {
+              "x-owner-email": ownerEmail,
+            },
+          });
+
+          const wishlistsPayload = (await wishlistsResponse.json()) as WishlistsListResponse;
+          if (cancelled) return;
+
+          if (!wishlistsResponse.ok || !wishlistsPayload.ok) {
+            setShareUrlPreview(null);
+            return;
+          }
+
+          const currentWishlist = wishlistsPayload.wishlists.find((wishlist) => wishlist.id === wishlistId);
+          setShareUrlPreview(currentWishlist?.shareUrlPreview || null);
+        } catch {
+          if (!cancelled) {
+            setShareUrlPreview(null);
+          }
+        }
       } catch {
         if (!cancelled) {
           setLoadError("Unable to load items. Please retry.");
           setItems([]);
+          setShareUrlPreview(null);
         }
       } finally {
         if (!cancelled) setIsLoading(false);
@@ -692,6 +763,68 @@ export default function WishlistEditorPage() {
     setFormSuccess("Item archived.");
   }
 
+  async function copyShareLink(value: string) {
+    try {
+      await navigator.clipboard.writeText(value);
+      setRotateShareLinkSuccess("Share link copied.");
+      setRotateShareLinkError(null);
+    } catch {
+      setRotateShareLinkError("Clipboard unavailable. Copy the link manually.");
+    }
+  }
+
+  function dismissOneTimeShareLink() {
+    setOneTimeShareUrl(null);
+    setRotateShareLinkSuccess("One-time reveal dismissed.");
+  }
+
+  async function onRotateShareLink() {
+    const ownerEmail = getAuthenticatedEmail();
+    if (!ownerEmail) {
+      persistReturnTo(`/wishlists/${wishlistId}`);
+      router.replace(`/login?returnTo=${encodeURIComponent(`/wishlists/${wishlistId}`)}`);
+      return;
+    }
+
+    setIsRotatingShareLink(true);
+    setRotateShareLinkError(null);
+    setRotateShareLinkSuccess(null);
+
+    let response: Response;
+    try {
+      response = await fetch(`/api/wishlists/${wishlistId}/rotate-share-link`, {
+        method: "POST",
+        headers: {
+          "x-owner-email": ownerEmail,
+          "x-idempotency-key": createIdempotencyKey(),
+        },
+      });
+    } catch {
+      setIsRotatingShareLink(false);
+      setRotateShareLinkError("Unable to rotate share link right now. Please retry.");
+      return;
+    }
+
+    const payload = (await response.json()) as RotateShareLinkResponse;
+    setIsRotatingShareLink(false);
+
+    if (!response.ok || !payload.ok) {
+      const message = payload && !payload.ok ? payload.error.message : "Unable to rotate share link right now.";
+      setRotateShareLinkError(message);
+      return;
+    }
+
+    if (payload.alreadyProcessed) {
+      setOneTimeShareUrl(null);
+      setRotateShareLinkSuccess("Rotation already processed. Generate again for a new one-time link.");
+      return;
+    }
+
+    setOneTimeShareUrl(payload.shareUrl);
+    setShareUrlPreview(payload.shareUrlPreview);
+    setRotateShareLinkSuccess("Share link rotated. Copy the new link now before dismissing.");
+  }
+
   async function onAutofillFromUrl() {
     setMetadataMessage(null);
 
@@ -866,6 +999,64 @@ export default function WishlistEditorPage() {
               </button>
             ) : null}
           </div>
+
+          <section className="mt-4 rounded-xl border border-zinc-200 bg-zinc-50 p-3">
+            <h3 className="text-sm font-semibold text-zinc-900">Share link settings</h3>
+            <p className="mt-1 text-xs text-zinc-600">
+              Regenerating is immediate and invalidates the previous public link.
+            </p>
+
+            <div className="mt-3 rounded-md border border-zinc-200 bg-white p-3">
+              <p className="text-xs font-medium text-zinc-700">Current share link</p>
+              <p className="mt-1 break-all text-xs text-zinc-600">{shareUrlPreview || "Unavailable until wishlist sync completes."}</p>
+
+              <div className="mt-3 flex flex-wrap gap-2">
+                {shareUrlPreview ? (
+                  <button
+                    className="rounded-md border border-zinc-300 px-3 py-2 text-xs font-medium text-zinc-800"
+                    onClick={() => copyShareLink(shareUrlPreview)}
+                    type="button"
+                  >
+                    Copy current link
+                  </button>
+                ) : null}
+                <button
+                  className="rounded-md border border-rose-300 px-3 py-2 text-xs font-medium text-rose-800 disabled:opacity-60"
+                  disabled={isRotatingShareLink}
+                  onClick={onRotateShareLink}
+                  type="button"
+                >
+                  {isRotatingShareLink ? "Regenerating..." : "Regenerate link"}
+                </button>
+              </div>
+            </div>
+
+            {oneTimeShareUrl ? (
+              <div className="mt-3 rounded-md border border-amber-300 bg-amber-50 p-3">
+                <p className="text-xs font-semibold text-amber-900">One-time reveal: copy this new link now.</p>
+                <p className="mt-1 break-all text-xs text-amber-900">{oneTimeShareUrl}</p>
+                <div className="mt-3 flex flex-wrap gap-2">
+                  <button
+                    className="rounded-md border border-amber-400 px-3 py-2 text-xs font-medium text-amber-900"
+                    onClick={() => copyShareLink(oneTimeShareUrl)}
+                    type="button"
+                  >
+                    Copy new link
+                  </button>
+                  <button
+                    className="rounded-md border border-amber-400 px-3 py-2 text-xs font-medium text-amber-900"
+                    onClick={dismissOneTimeShareLink}
+                    type="button"
+                  >
+                    Dismiss reveal
+                  </button>
+                </div>
+              </div>
+            ) : null}
+
+            {rotateShareLinkError ? <p className="mt-2 text-xs text-rose-700">{rotateShareLinkError}</p> : null}
+            {rotateShareLinkSuccess ? <p className="mt-2 text-xs text-emerald-700">{rotateShareLinkSuccess}</p> : null}
+          </section>
 
           <form className="mt-4 space-y-4" onSubmit={onSubmit} noValidate>
             <div>

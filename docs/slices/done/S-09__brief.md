@@ -1,4 +1,4 @@
-status: pending
+status: done
 id: S-09
 topic: brief.md
 title: Secrets lifecycle and share-link rotation

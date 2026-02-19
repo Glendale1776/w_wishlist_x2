@@ -1,4 +1,4 @@
-status: pending
+status: done
 id: S-03
 topic: brief.md
 title: Onboarding and owner wishlists UI shell

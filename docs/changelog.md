@@ -4,3 +4,4 @@
 - 2026-02-19 | S-02 | docs/locks/context-S-02-20260219-1434-1b32b0f.lock.md | Re-baselined context lock to current HEAD for S-02 pre-implementation.
 - 2026-02-19 | S-02 | docs/locks/context-S-02-20260219-1440-e4601f2.lock.md | Implemented auth routes (/login, /signup, /forgot-password) with returnTo sanitization and client validation.
 - 2026-02-19 | S-03 | docs/locks/context-S-03-20260219-1446-f85f633.lock.md | Added onboarding + my wishlists shell with search/sort query state and copy-link toast scaffolding.
+- 2026-02-19 | S-04 | docs/locks/context-S-04-20260219-1505-b496d05.lock.md | Added /api/wishlists create/list, UI wiring for onboarding + my wishlists, and migration supabase/migrations/S-04.sql.

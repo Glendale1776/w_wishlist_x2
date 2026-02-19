@@ -4,8 +4,12 @@ import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { FormEvent, useMemo, useState } from "react";
 
+import { getAuthenticatedEmail, persistReturnTo } from "@/app/_lib/auth-client";
+import { ApiErrorResponse, WishlistCreateResponse } from "@/app/_lib/wishlist-shell";
+
 type OnboardingErrors = {
   title?: string;
+  occasionNote?: string;
 };
 
 const SAMPLE_ITEMS = ["Portable projector", "Air fryer", "Weekend luggage"];
@@ -20,8 +24,10 @@ export default function OnboardingPage() {
   const [useSampleItems, setUseSampleItems] = useState(false);
 
   const [errors, setErrors] = useState<OnboardingErrors>({});
+  const [apiError, setApiError] = useState<string | null>(null);
   const [isCreated, setIsCreated] = useState(false);
   const [showSampleTip, setShowSampleTip] = useState(true);
+  const [isSubmitting, setIsSubmitting] = useState(false);
 
   const progressPercent = useMemo(() => (step / 2) * 100, [step]);
 
@@ -40,16 +46,58 @@ export default function OnboardingPage() {
     setStep(2);
   }
 
-  function createWishlist() {
+  async function createWishlist() {
     const nextErrors = validateStepOne();
     setErrors(nextErrors);
+    setApiError(null);
     if (nextErrors.title) {
       setStep(1);
       return;
     }
 
+    const ownerEmail = getAuthenticatedEmail();
+    if (!ownerEmail) {
+      persistReturnTo("/onboarding");
+      router.push("/login?returnTo=/onboarding");
+      return;
+    }
+
+    setIsSubmitting(true);
+    let response: Response;
+    try {
+      response = await fetch("/api/wishlists", {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          "x-owner-email": ownerEmail,
+        },
+        body: JSON.stringify({
+          title: title.trim(),
+          occasionDate: occasionDate || null,
+          occasionNote: occasionNote || null,
+          currency: "USD",
+        }),
+      });
+    } catch {
+      setIsSubmitting(false);
+      setApiError("Unable to create wishlist right now. Please retry.");
+      return;
+    }
+
+    const payload = (await response.json()) as WishlistCreateResponse | ApiErrorResponse;
+    setIsSubmitting(false);
+
+    if (!response.ok || !payload.ok) {
+      if (payload && !payload.ok && payload.error.fieldErrors) {
+        setErrors((prev) => ({ ...prev, ...payload.error.fieldErrors }));
+      }
+      setApiError(payload && !payload.ok ? payload.error.message : "Unable to create wishlist right now.");
+      return;
+    }
+
     setIsCreated(true);
     setShowSampleTip(true);
+    router.push("/wishlists?created=1");
   }
 
   return (
@@ -111,6 +159,7 @@ export default function OnboardingPage() {
                 placeholder="Anything friends should know?"
                 value={occasionNote}
               />
+              {errors.occasionNote ? <p className="mt-1 text-xs text-rose-700">{errors.occasionNote}</p> : null}
             </div>
 
             <div className="flex flex-col gap-3 pt-1 sm:flex-row sm:items-center sm:justify-between">
@@ -181,20 +230,26 @@ export default function OnboardingPage() {
               </div>
             ) : null}
 
+            {apiError ? (
+              <div className="rounded-xl border border-rose-200 bg-rose-50 p-4 text-sm text-rose-900">{apiError}</div>
+            ) : null}
+
             <div className="flex flex-col gap-3 pt-1 sm:flex-row sm:items-center sm:justify-between">
               <button
                 className="inline-flex items-center justify-center rounded-md border border-zinc-300 px-4 py-2.5 text-sm font-medium text-zinc-800"
+                disabled={isSubmitting}
                 onClick={() => setStep(1)}
                 type="button"
               >
                 Back
               </button>
               <button
-                className="inline-flex items-center justify-center rounded-md bg-zinc-900 px-4 py-2.5 text-sm font-medium text-white"
+                className="inline-flex items-center justify-center rounded-md bg-zinc-900 px-4 py-2.5 text-sm font-medium text-white disabled:cursor-not-allowed disabled:opacity-60"
+                disabled={isSubmitting}
                 onClick={createWishlist}
                 type="button"
               >
-                Create wishlist
+                {isSubmitting ? "Creating wishlist..." : "Create wishlist"}
               </button>
             </div>
           </section>

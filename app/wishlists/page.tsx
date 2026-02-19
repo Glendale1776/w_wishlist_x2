@@ -2,16 +2,16 @@
 
 import Link from "next/link";
 import { useRouter, useSearchParams } from "next/navigation";
-import { Suspense, useEffect, useMemo, useState } from "react";
+import { Suspense, useEffect, useState } from "react";
 
+import { getAuthenticatedEmail, persistReturnTo } from "@/app/_lib/auth-client";
 import {
-  buildShareUrl,
-  filterAndSortWishlists,
-  MOCK_WISHLISTS,
+  ApiErrorResponse,
+  createWishlistsQuery,
   parseWishlistSort,
-  parseWishlistViewState,
+  WishlistListResponse,
+  WishlistPreview,
   WishlistSort,
-  WishlistViewState,
 } from "@/app/_lib/wishlist-shell";
 
 type ToastState = {
@@ -22,18 +22,25 @@ type ToastState = {
 function WishlistsContent() {
   const router = useRouter();
   const searchParams = useSearchParams();
+
   const [toast, setToast] = useState<ToastState>(null);
   const [isLoading, setIsLoading] = useState(true);
+  const [loadError, setLoadError] = useState<string | null>(null);
+  const [list, setList] = useState<WishlistPreview[]>([]);
 
   const search = searchParams.get("search") || "";
   const sort = parseWishlistSort(searchParams.get("sort"));
-  const view = parseWishlistViewState(searchParams.get("state"));
+  const created = searchParams.get("created") === "1";
 
   useEffect(() => {
-    setIsLoading(true);
-    const timer = window.setTimeout(() => setIsLoading(false), 550);
-    return () => window.clearTimeout(timer);
-  }, [search, sort, view]);
+    if (!created) return;
+
+    setToast({ kind: "success", message: "Wishlist created." });
+    const params = new URLSearchParams(searchParams.toString());
+    params.delete("created");
+    const next = params.toString();
+    router.replace(next ? `/wishlists?${next}` : "/wishlists");
+  }, [created, router, searchParams]);
 
   useEffect(() => {
     if (!toast) return;
@@ -41,15 +48,64 @@ function WishlistsContent() {
     return () => window.clearTimeout(timer);
   }, [toast]);
 
-  const list = useMemo(() => {
-    const source = view === "empty" ? [] : MOCK_WISHLISTS;
-    return filterAndSortWishlists(source, search, sort);
-  }, [search, sort, view]);
+  useEffect(() => {
+    let cancelled = false;
+
+    async function run() {
+      const query = createWishlistsQuery(search, sort);
+      const returnTo = query ? `/wishlists?${query}` : "/wishlists";
+      const ownerEmail = getAuthenticatedEmail();
+
+      if (!ownerEmail) {
+        persistReturnTo(returnTo);
+        router.replace(`/login?returnTo=${encodeURIComponent(returnTo)}`);
+        return;
+      }
+
+      setIsLoading(true);
+      setLoadError(null);
+
+      try {
+        const response = await fetch(`/api/wishlists${query ? `?${query}` : ""}`, {
+          headers: { "x-owner-email": ownerEmail },
+        });
+
+        const payload = (await response.json()) as WishlistListResponse | ApiErrorResponse;
+
+        if (cancelled) return;
+
+        if (!response.ok || !payload.ok) {
+          const message = payload && !payload.ok ? payload.error.message : "Unable to load wishlists.";
+          if (response.status === 401) {
+            persistReturnTo(returnTo);
+            router.replace(`/login?returnTo=${encodeURIComponent(returnTo)}`);
+            return;
+          }
+          setLoadError(message);
+          setList([]);
+          return;
+        }
+
+        setList(payload.wishlists);
+      } catch {
+        if (cancelled) return;
+        setLoadError("Unable to load wishlists. Please retry.");
+        setList([]);
+      } finally {
+        if (!cancelled) setIsLoading(false);
+      }
+    }
+
+    run();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [search, sort, router]);
 
   function setQueryValues(next: {
     search?: string;
     sort?: WishlistSort;
-    state?: WishlistViewState;
   }) {
     const params = new URLSearchParams(searchParams.toString());
 
@@ -63,18 +119,13 @@ function WishlistsContent() {
       else params.set("sort", next.sort);
     }
 
-    if (next.state !== undefined) {
-      if (next.state === "populated") params.delete("state");
-      else params.set("state", next.state);
-    }
+    params.delete("created");
 
     const query = params.toString();
     router.replace(query ? `/wishlists?${query}` : "/wishlists");
   }
 
-  async function copyShareLink(token: string) {
-    const shareUrl = buildShareUrl(token);
-
+  async function copyShareLink(shareUrl: string) {
     try {
       await navigator.clipboard.writeText(shareUrl);
       setToast({ kind: "success", message: "Share link copied." });
@@ -112,7 +163,7 @@ function WishlistsContent() {
           </Link>
         </div>
 
-        <div className="mt-5 grid gap-3 sm:grid-cols-3">
+        <div className="mt-5 grid gap-3 sm:grid-cols-2">
           <label className="text-sm">
             <span className="mb-1 block font-medium text-zinc-800">Search</span>
             <input
@@ -134,18 +185,6 @@ function WishlistsContent() {
               <option value="title_asc">Title (A-Z)</option>
             </select>
           </label>
-
-          <label className="text-sm">
-            <span className="mb-1 block font-medium text-zinc-800">Mock state</span>
-            <select
-              className="w-full rounded-md border border-zinc-300 px-3 py-2 text-sm outline-none focus:border-zinc-500"
-              onChange={(event) => setQueryValues({ state: parseWishlistViewState(event.target.value) })}
-              value={view}
-            >
-              <option value="populated">Populated</option>
-              <option value="empty">Empty</option>
-            </select>
-          </label>
         </div>
       </header>
 
@@ -155,6 +194,17 @@ function WishlistsContent() {
             <div className="h-24 animate-pulse rounded-xl border border-zinc-200 bg-white" />
             <div className="h-24 animate-pulse rounded-xl border border-zinc-200 bg-white" />
           </>
+        ) : loadError ? (
+          <div className="rounded-xl border border-rose-200 bg-rose-50 p-5 text-sm text-rose-900">
+            <p>{loadError}</p>
+            <button
+              className="mt-3 rounded-md border border-rose-300 px-3 py-2 text-xs font-medium"
+              onClick={() => router.refresh()}
+              type="button"
+            >
+              Retry
+            </button>
+          </div>
         ) : list.length === 0 ? (
           <div className="rounded-xl border border-dashed border-zinc-300 bg-white p-6 text-center">
             <h2 className="text-base font-semibold text-zinc-900">No wishlists yet</h2>
@@ -188,7 +238,7 @@ function WishlistsContent() {
                 </Link>
                 <button
                   className="inline-flex items-center rounded-md bg-zinc-900 px-3 py-2 text-sm font-medium text-white"
-                  onClick={() => copyShareLink(item.shareToken)}
+                  onClick={() => copyShareLink(item.shareUrlPreview)}
                   type="button"
                 >
                   Copy share link

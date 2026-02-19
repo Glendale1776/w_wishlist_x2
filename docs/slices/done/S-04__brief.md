@@ -1,4 +1,4 @@
-status: pending
+status: done
 id: S-04
 topic: brief.md
 title: Wishlist create/list APIs and schema bootstrap

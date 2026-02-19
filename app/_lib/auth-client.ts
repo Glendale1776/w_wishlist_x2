@@ -67,6 +67,21 @@ export function isAuthenticated(): boolean {
   return Boolean(window.localStorage.getItem(AUTH_KEY));
 }
 
+export function getAuthenticatedEmail(): string | null {
+  if (typeof window === "undefined") return null;
+  const raw = window.localStorage.getItem(AUTH_KEY);
+  if (!raw) return null;
+
+  try {
+    const parsed = JSON.parse(raw) as { email?: string };
+    const email = parsed.email?.trim().toLowerCase() ?? "";
+    if (!EMAIL_REGEX.test(email)) return null;
+    return email;
+  } catch {
+    return null;
+  }
+}
+
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }

@@ -1,4 +1,4 @@
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 
 export type ItemRecord = {
   id: string;
@@ -17,7 +17,7 @@ export type ItemRecord = {
 
 type AuditEvent = {
   id: string;
-  action: "create" | "update" | "archive";
+  action: "create" | "update" | "archive" | "reserve" | "unreserve" | "contribute";
   entityId: string;
   ownerEmail: string;
   createdAt: string;
@@ -52,6 +52,40 @@ type PreviewTicket = {
   expiresAt: number;
 };
 
+export type ReservationRecord = {
+  id: string;
+  wishlistId: string;
+  itemId: string;
+  actorEmail: string;
+  status: "active" | "released";
+  createdAt: string;
+  updatedAt: string;
+};
+
+export type ContributionRecord = {
+  id: string;
+  wishlistId: string;
+  itemId: string;
+  actorEmail: string;
+  amountCents: number;
+  createdAt: string;
+};
+
+type IdempotencyRecord = {
+  scope: string;
+  actorEmail: string;
+  key: string;
+  payloadHash: string;
+  status: number;
+  body: unknown;
+  expiresAt: number;
+};
+
+type RateLimitWindow = {
+  count: number;
+  windowStartedAt: number;
+};
+
 export type PrepareImageUploadError =
   | "NOT_FOUND"
   | "FORBIDDEN"
@@ -72,7 +106,9 @@ export type UploadItemImageError =
 export type CreatePreviewError = "NOT_FOUND" | "FORBIDDEN";
 export type ResolvePreviewError = "INVALID_PREVIEW_TOKEN" | "NOT_FOUND";
 
-const STORAGE_PREFIX = "storage://";
+export type ReservationMutationError = "NOT_FOUND" | "ARCHIVED" | "ALREADY_RESERVED" | "NO_ACTIVE_RESERVATION";
+
+export type ContributionMutationError = "NOT_FOUND" | "ARCHIVED" | "NOT_GROUP_FUNDED" | "INVALID_AMOUNT";
 
 export type PublicItemReadModel = {
   id: string;
@@ -88,30 +124,77 @@ export type PublicItemReadModel = {
   updatedAt: string;
 };
 
+export type ActivityEntry = {
+  id: string;
+  kind: "reservation" | "contribution";
+  action: "reserved" | "unreserved" | "contributed";
+  wishlistId: string;
+  itemId: string;
+  itemTitle: string;
+  amountCents: number | null;
+  status: "active" | "released" | null;
+  happenedAt: string;
+};
+
+export type IdempotencyReadResult =
+  | {
+      kind: "miss";
+    }
+  | {
+      kind: "payload_mismatch";
+    }
+  | {
+      kind: "cached";
+      status: number;
+      body: unknown;
+    };
+
+const STORAGE_PREFIX = "storage://";
+const RATE_LIMIT_WINDOW_MS = 60_000;
+
+type ItemStore = {
+  items: ItemRecord[];
+  auditEvents: AuditEvent[];
+  images: StoredImage[];
+  uploadTickets: UploadTicket[];
+  previewTickets: PreviewTicket[];
+  reservations: ReservationRecord[];
+  contributions: ContributionRecord[];
+  idempotency: IdempotencyRecord[];
+  rateLimits: Record<string, RateLimitWindow>;
+};
+
 declare global {
   // eslint-disable-next-line no-var
-  var __itemStore:
-    | {
-        items: ItemRecord[];
-        auditEvents: AuditEvent[];
-        images: StoredImage[];
-        uploadTickets: UploadTicket[];
-        previewTickets: PreviewTicket[];
-      }
-    | undefined;
+  var __itemStore: Partial<ItemStore> | undefined;
 }
 
-function getStore() {
+function getStore(): ItemStore {
   if (!globalThis.__itemStore) {
-    globalThis.__itemStore = {
-      items: [],
-      auditEvents: [],
-      images: [],
-      uploadTickets: [],
-      previewTickets: [],
-    };
+    globalThis.__itemStore = {};
   }
-  return globalThis.__itemStore;
+
+  const store = globalThis.__itemStore;
+
+  if (!store.items) store.items = [];
+  if (!store.auditEvents) store.auditEvents = [];
+  if (!store.images) store.images = [];
+  if (!store.uploadTickets) store.uploadTickets = [];
+  if (!store.previewTickets) store.previewTickets = [];
+  if (!store.reservations) store.reservations = [];
+  if (!store.contributions) store.contributions = [];
+  if (!store.idempotency) store.idempotency = [];
+  if (!store.rateLimits) store.rateLimits = {};
+
+  return store as ItemStore;
+}
+
+function nowIso() {
+  return new Date().toISOString();
+}
+
+function nowMs() {
+  return Date.now();
 }
 
 function logAudit(action: AuditEvent["action"], entityId: string, ownerEmail: string) {
@@ -121,7 +204,7 @@ function logAudit(action: AuditEvent["action"], entityId: string, ownerEmail: st
     action,
     entityId,
     ownerEmail,
-    createdAt: new Date().toISOString(),
+    createdAt: nowIso(),
   });
 }
 
@@ -139,10 +222,6 @@ function findDuplicateUrl(input: {
   });
 }
 
-function nowIso() {
-  return new Date().toISOString();
-}
-
 function isStorageRef(value: string | null | undefined): value is string {
   return Boolean(value && value.startsWith(STORAGE_PREFIX));
 }
@@ -157,10 +236,26 @@ function removeImageByPath(path: string) {
   store.previewTickets = store.previewTickets.filter((ticket) => ticket.path !== path);
 }
 
-function pruneExpiredTickets(now = Date.now()) {
+function pruneExpiredTickets(now = nowMs()) {
   const store = getStore();
   store.uploadTickets = store.uploadTickets.filter((ticket) => ticket.expiresAt > now);
   store.previewTickets = store.previewTickets.filter((ticket) => ticket.expiresAt > now);
+}
+
+function pruneExpiredIdempotency(now = nowMs()) {
+  const store = getStore();
+  store.idempotency = store.idempotency.filter((entry) => entry.expiresAt > now);
+}
+
+function pruneExpiredRateWindows(now = nowMs()) {
+  const store = getStore();
+  const keys = Object.keys(store.rateLimits);
+  for (const key of keys) {
+    const window = store.rateLimits[key];
+    if (now - window.windowStartedAt >= RATE_LIMIT_WINDOW_MS) {
+      delete store.rateLimits[key];
+    }
+  }
 }
 
 function sanitizeFilename(filename: string): string {
@@ -186,10 +281,59 @@ function createPreviewTicket(itemId: string, path: string, ttlSeconds: number) {
     token,
     itemId,
     path,
-    expiresAt: Date.now() + ttlSeconds * 1000,
+    expiresAt: nowMs() + ttlSeconds * 1000,
   });
 
   return token;
+}
+
+function fundedCentsForItem(itemId: string): number {
+  const store = getStore();
+  return store.contributions
+    .filter((contribution) => contribution.itemId === itemId)
+    .reduce((sum, contribution) => sum + contribution.amountCents, 0);
+}
+
+function activeReservationForItem(itemId: string): ReservationRecord | null {
+  const store = getStore();
+  const found = store.reservations.find((reservation) => reservation.itemId === itemId && reservation.status === "active");
+  return found || null;
+}
+
+function buildPublicItemReadModel(item: ItemRecord): PublicItemReadModel {
+  const fundedCents = fundedCentsForItem(item.id);
+  const activeReservation = activeReservationForItem(item.id);
+  const ratio =
+    item.isGroupFunded && item.targetCents && item.targetCents > 0
+      ? Math.min(fundedCents, item.targetCents) / item.targetCents
+      : 0;
+
+  return {
+    id: item.id,
+    title: item.title,
+    url: item.url,
+    imageUrl: item.imageUrl && !isStorageRef(item.imageUrl) ? item.imageUrl : null,
+    priceCents: item.priceCents,
+    isGroupFunded: item.isGroupFunded,
+    targetCents: item.targetCents,
+    fundedCents,
+    progressRatio: ratio,
+    availability: activeReservation ? "reserved" : "available",
+    updatedAt: item.updatedAt,
+  };
+}
+
+function findActiveReservationForActor(itemId: string, actorEmail: string): ReservationRecord | null {
+  const store = getStore();
+  const found = store.reservations.find(
+    (reservation) => reservation.itemId === itemId && reservation.actorEmail === actorEmail && reservation.status === "active",
+  );
+  return found || null;
+}
+
+function hashPayload(payload: unknown): string {
+  const normalized = JSON.stringify(payload ?? null);
+  return createHash("sha256").update(normalized).digest("hex");
 }
 
 export function createItem(input: {
@@ -313,27 +457,270 @@ export function listPublicItemsForWishlist(input: { wishlistId: string }): Publi
   return store.items
     .filter((item) => item.wishlistId === input.wishlistId && !item.archivedAt)
     .sort((a, b) => new Date(b.updatedAt).getTime() - new Date(a.updatedAt).getTime())
-    .map((item) => {
-      const fundedCents = 0;
-      const ratio =
-        item.isGroupFunded && item.targetCents && item.targetCents > 0
-          ? Math.min(fundedCents, item.targetCents) / item.targetCents
-          : 0;
+    .map((item) => buildPublicItemReadModel(item));
+}
 
-      return {
-        id: item.id,
-        title: item.title,
-        url: item.url,
-        imageUrl: item.imageUrl && !isStorageRef(item.imageUrl) ? item.imageUrl : null,
-        priceCents: item.priceCents,
-        isGroupFunded: item.isGroupFunded,
-        targetCents: item.targetCents,
-        fundedCents,
-        progressRatio: ratio,
-        availability: "available",
-        updatedAt: item.updatedAt,
-      };
+export function reservePublicItem(input: { wishlistId: string; itemId: string; actorEmail: string }) {
+  const store = getStore();
+  const item = store.items.find((candidate) => candidate.id === input.itemId && candidate.wishlistId === input.wishlistId);
+
+  if (!item) {
+    return { error: "NOT_FOUND" as ReservationMutationError };
+  }
+
+  if (item.archivedAt) {
+    return { error: "ARCHIVED" as ReservationMutationError };
+  }
+
+  const existingActive = activeReservationForItem(item.id);
+  if (existingActive) {
+    if (existingActive.actorEmail !== input.actorEmail) {
+      return { error: "ALREADY_RESERVED" as ReservationMutationError };
+    }
+
+    return {
+      reservationStatus: "active" as const,
+      item: buildPublicItemReadModel(item),
+      idempotent: true,
+    };
+  }
+
+  const now = nowIso();
+  const existingReleased = store.reservations.find(
+    (reservation) =>
+      reservation.itemId === item.id && reservation.actorEmail === input.actorEmail && reservation.status === "released",
+  );
+
+  if (existingReleased) {
+    existingReleased.status = "active";
+    existingReleased.updatedAt = now;
+  } else {
+    store.reservations.unshift({
+      id: randomUUID(),
+      wishlistId: item.wishlistId,
+      itemId: item.id,
+      actorEmail: input.actorEmail,
+      status: "active",
+      createdAt: now,
+      updatedAt: now,
     });
+  }
+
+  item.updatedAt = now;
+  logAudit("reserve", item.id, input.actorEmail);
+
+  return {
+    reservationStatus: "active" as const,
+    item: buildPublicItemReadModel(item),
+    idempotent: false,
+  };
+}
+
+export function unreservePublicItem(input: { wishlistId: string; itemId: string; actorEmail: string }) {
+  const store = getStore();
+  const item = store.items.find((candidate) => candidate.id === input.itemId && candidate.wishlistId === input.wishlistId);
+
+  if (!item) {
+    return { error: "NOT_FOUND" as ReservationMutationError };
+  }
+
+  if (item.archivedAt) {
+    return { error: "ARCHIVED" as ReservationMutationError };
+  }
+
+  const actorReservation = findActiveReservationForActor(item.id, input.actorEmail);
+  if (!actorReservation) {
+    return { error: "NO_ACTIVE_RESERVATION" as ReservationMutationError };
+  }
+
+  actorReservation.status = "released";
+  actorReservation.updatedAt = nowIso();
+
+  item.updatedAt = actorReservation.updatedAt;
+  logAudit("unreserve", item.id, input.actorEmail);
+
+  return {
+    reservationStatus: "released" as const,
+    item: buildPublicItemReadModel(item),
+  };
+}
+
+export function contributeToPublicItem(input: {
+  wishlistId: string;
+  itemId: string;
+  actorEmail: string;
+  amountCents: number;
+}) {
+  const store = getStore();
+  const item = store.items.find((candidate) => candidate.id === input.itemId && candidate.wishlistId === input.wishlistId);
+
+  if (!item) {
+    return { error: "NOT_FOUND" as ContributionMutationError };
+  }
+
+  if (item.archivedAt) {
+    return { error: "ARCHIVED" as ContributionMutationError };
+  }
+
+  if (!item.isGroupFunded) {
+    return { error: "NOT_GROUP_FUNDED" as ContributionMutationError };
+  }
+
+  if (!Number.isInteger(input.amountCents) || input.amountCents < 100) {
+    return { error: "INVALID_AMOUNT" as ContributionMutationError };
+  }
+
+  const contribution: ContributionRecord = {
+    id: randomUUID(),
+    wishlistId: item.wishlistId,
+    itemId: item.id,
+    actorEmail: input.actorEmail,
+    amountCents: input.amountCents,
+    createdAt: nowIso(),
+  };
+
+  store.contributions.unshift(contribution);
+  item.updatedAt = contribution.createdAt;
+  logAudit("contribute", item.id, input.actorEmail);
+
+  return {
+    contribution,
+    item: buildPublicItemReadModel(item),
+  };
+}
+
+export function listActivityForActor(input: { actorEmail: string }): ActivityEntry[] {
+  const store = getStore();
+  const itemTitleById = new Map(store.items.map((item) => [item.id, item.title]));
+
+  const reservationEntries: ActivityEntry[] = store.reservations
+    .filter((reservation) => reservation.actorEmail === input.actorEmail)
+    .map((reservation) => ({
+      id: `res-${reservation.id}`,
+      kind: "reservation",
+      action: reservation.status === "active" ? "reserved" : "unreserved",
+      wishlistId: reservation.wishlistId,
+      itemId: reservation.itemId,
+      itemTitle: itemTitleById.get(reservation.itemId) || "Untitled item",
+      amountCents: null,
+      status: reservation.status,
+      happenedAt: reservation.updatedAt,
+    }));
+
+  const contributionEntries: ActivityEntry[] = store.contributions
+    .filter((contribution) => contribution.actorEmail === input.actorEmail)
+    .map((contribution) => ({
+      id: `con-${contribution.id}`,
+      kind: "contribution",
+      action: "contributed",
+      wishlistId: contribution.wishlistId,
+      itemId: contribution.itemId,
+      itemTitle: itemTitleById.get(contribution.itemId) || "Untitled item",
+      amountCents: contribution.amountCents,
+      status: null,
+      happenedAt: contribution.createdAt,
+    }));
+
+  return [...reservationEntries, ...contributionEntries].sort(
+    (a, b) => new Date(b.happenedAt).getTime() - new Date(a.happenedAt).getTime(),
+  );
+}
+
+export function readIdempotency(input: {
+  scope: string;
+  actorEmail: string;
+  key: string;
+  payload: unknown;
+}): IdempotencyReadResult {
+  pruneExpiredIdempotency();
+
+  const store = getStore();
+  const payloadHash = hashPayload(input.payload);
+  const existing = store.idempotency.find(
+    (entry) => entry.scope === input.scope && entry.actorEmail === input.actorEmail && entry.key === input.key,
+  );
+
+  if (!existing) {
+    return { kind: "miss" };
+  }
+
+  if (existing.payloadHash !== payloadHash) {
+    return { kind: "payload_mismatch" };
+  }
+
+  return {
+    kind: "cached",
+    status: existing.status,
+    body: existing.body,
+  };
+}
+
+export function writeIdempotency(input: {
+  scope: string;
+  actorEmail: string;
+  key: string;
+  payload: unknown;
+  status: number;
+  body: unknown;
+  ttlSec: number;
+}) {
+  pruneExpiredIdempotency();
+
+  const store = getStore();
+  const payloadHash = hashPayload(input.payload);
+
+  store.idempotency = store.idempotency.filter(
+    (entry) => !(entry.scope === input.scope && entry.actorEmail === input.actorEmail && entry.key === input.key),
+  );
+
+  store.idempotency.push({
+    scope: input.scope,
+    actorEmail: input.actorEmail,
+    key: input.key,
+    payloadHash,
+    status: input.status,
+    body: input.body,
+    expiresAt: nowMs() + input.ttlSec * 1000,
+  });
+}
+
+export function consumeActionRateLimit(input: {
+  scope: string;
+  actorEmail: string;
+  ipAddress: string;
+  limitPerMin: number;
+}): { ok: true } | { ok: false; retryAfterSec: number } {
+  pruneExpiredRateWindows();
+
+  const store = getStore();
+  const now = nowMs();
+  const key = `${input.scope}:${input.actorEmail}:${input.ipAddress}`;
+  const existing = store.rateLimits[key];
+
+  if (!existing) {
+    store.rateLimits[key] = {
+      count: 1,
+      windowStartedAt: now,
+    };
+    return { ok: true };
+  }
+
+  const elapsed = now - existing.windowStartedAt;
+  if (elapsed >= RATE_LIMIT_WINDOW_MS) {
+    store.rateLimits[key] = {
+      count: 1,
+      windowStartedAt: now,
+    };
+    return { ok: true };
+  }
+
+  if (existing.count >= input.limitPerMin) {
+    const retryAfterSec = Math.max(1, Math.ceil((RATE_LIMIT_WINDOW_MS - elapsed) / 1000));
+    return { ok: false, retryAfterSec };
+  }
+
+  existing.count += 1;
+  return { ok: true };
 }
 
 export function prepareItemImageUpload(input: {
@@ -388,7 +775,7 @@ export function prepareItemImageUpload(input: {
     path,
     mimeType: normalizedMime,
     maxBytes: input.maxBytes,
-    expiresAt: Date.now() + input.ttlSeconds * 1000,
+    expiresAt: nowMs() + input.ttlSeconds * 1000,
   });
 
   return {

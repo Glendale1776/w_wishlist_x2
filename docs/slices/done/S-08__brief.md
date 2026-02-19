@@ -1,4 +1,4 @@
-status: pending
+status: done
 id: S-08
 topic: brief.md
 title: Action connector for reserve, contribute, activity

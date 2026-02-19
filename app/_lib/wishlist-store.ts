@@ -174,3 +174,16 @@ export function resolvePublicWishlistByToken(
 
   return { wishlist: record };
 }
+
+export function getWishlistRecordById(wishlistId: string): WishlistRecord | null {
+  const store = getStore();
+  const found = store.wishlists.find((wishlist) => wishlist.id === wishlistId);
+  return found || null;
+}
+
+export function getPublicShareTokenForWishlist(wishlistId: string): string | null {
+  const store = getStore();
+  const found = store.wishlists.find((wishlist) => wishlist.id === wishlistId);
+  if (!found) return null;
+  return store.shareTokensByHash[found.shareTokenHash] || found.shareTokenHint;
+}

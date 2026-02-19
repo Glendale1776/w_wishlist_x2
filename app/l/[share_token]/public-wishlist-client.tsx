@@ -1,14 +1,32 @@
 "use client";
 
 import Link from "next/link";
+import { useRouter, useSearchParams } from "next/navigation";
 import { useCallback, useEffect, useMemo, useState } from "react";
+
+import { getAuthenticatedEmail, persistReturnTo } from "@/app/_lib/auth-client";
 
 type ApiErrorResponse = {
   ok: false;
   error: {
     code: string;
     message: string;
+    fieldErrors?: Record<string, string>;
+    retryAfterSec?: number;
   };
+};
+
+type PublicItem = {
+  id: string;
+  title: string;
+  url: string | null;
+  imageUrl: string | null;
+  priceCents: number | null;
+  isGroupFunded: boolean;
+  targetCents: number | null;
+  fundedCents: number;
+  progressRatio: number;
+  availability: "available" | "reserved";
 };
 
 type PublicWishlistResponse =
@@ -24,18 +42,7 @@ type PublicWishlistResponse =
         shareUrl: string;
         itemCount: number;
       };
-      items: Array<{
-        id: string;
-        title: string;
-        url: string | null;
-        imageUrl: string | null;
-        priceCents: number | null;
-        isGroupFunded: boolean;
-        targetCents: number | null;
-        fundedCents: number;
-        progressRatio: number;
-        availability: "available" | "reserved";
-      }>;
+      items: PublicItem[];
     }
   | ApiErrorResponse;
 
@@ -52,18 +59,7 @@ type StreamMessage =
         shareUrl: string;
         itemCount: number;
       };
-      items: Array<{
-        id: string;
-        title: string;
-        url: string | null;
-        imageUrl: string | null;
-        priceCents: number | null;
-        isGroupFunded: boolean;
-        targetCents: number | null;
-        fundedCents: number;
-        progressRatio: number;
-        availability: "available" | "reserved";
-      }>;
+      items: PublicItem[];
     }
   | {
       type: "heartbeat";
@@ -72,6 +68,28 @@ type StreamMessage =
   | {
       type: "not_found";
     };
+
+type ReservationActionResponse =
+  | {
+      ok: true;
+      reservation: {
+        status: "active" | "released";
+      };
+      item: PublicItem;
+    }
+  | ApiErrorResponse;
+
+type ContributionActionResponse =
+  | {
+      ok: true;
+      contribution: {
+        id: string;
+        amountCents: number;
+        createdAt: string;
+      };
+      item: PublicItem;
+    }
+  | ApiErrorResponse;
 
 type PublicWishlistModel = Extract<PublicWishlistResponse, { ok: true }>;
 
@@ -99,11 +117,28 @@ function formatDate(value: string | null) {
 }
 
 function buildAuthReturnTo(shareToken: string, itemId: string) {
-  const returnTo = `/l/${shareToken}?item=${itemId}`;
-  return `/login?returnTo=${encodeURIComponent(returnTo)}`;
+  return `/l/${shareToken}?item=${encodeURIComponent(itemId)}`;
+}
+
+function parseContributionToCents(value: string): number {
+  const normalized = value.replace(/,/g, "").trim();
+  if (!normalized) return Number.NaN;
+  const asNumber = Number(normalized);
+  if (!Number.isFinite(asNumber)) return Number.NaN;
+  return Math.round(asNumber * 100);
+}
+
+function createIdempotencyKey() {
+  if (typeof crypto !== "undefined" && typeof crypto.randomUUID === "function") {
+    return crypto.randomUUID();
+  }
+  return `${Date.now()}-${Math.random().toString(36).slice(2)}`;
 }
 
 export default function PublicWishlistClient({ shareToken }: { shareToken: string }) {
+  const router = useRouter();
+  const searchParams = useSearchParams();
+
   const [model, setModel] = useState<PublicWishlistModel | null>(null);
   const [isLoading, setIsLoading] = useState(true);
   const [pageError, setPageError] = useState<string | null>(null);
@@ -112,6 +147,12 @@ export default function PublicWishlistClient({ shareToken }: { shareToken: strin
   const [search, setSearch] = useState("");
   const [availabilityFilter, setAvailabilityFilter] = useState<"all" | "available" | "reserved">("all");
   const [fundingFilter, setFundingFilter] = useState<"all" | "group" | "single">("all");
+
+  const [activeItemId, setActiveItemId] = useState<string | null>(null);
+  const [contributionInput, setContributionInput] = useState("");
+  const [isMutating, setIsMutating] = useState(false);
+  const [actionError, setActionError] = useState<string | null>(null);
+  const [actionSuccess, setActionSuccess] = useState<string | null>(null);
 
   const applyModel = useCallback((nextModel: PublicWishlistModel, preserveScroll: boolean) => {
     if (!preserveScroll || typeof window === "undefined") {
@@ -140,6 +181,26 @@ export default function PublicWishlistClient({ shareToken }: { shareToken: strin
 
     return payload;
   }, [shareToken]);
+
+  const updateItemInModel = useCallback((nextItem: PublicItem) => {
+    setModel((current) => {
+      if (!current) return current;
+
+      return {
+        ...current,
+        items: current.items.map((item) => (item.id === nextItem.id ? nextItem : item)),
+      };
+    });
+  }, []);
+
+  const redirectToLoginForItem = useCallback(
+    (itemId: string) => {
+      const returnTo = buildAuthReturnTo(shareToken, itemId);
+      persistReturnTo(returnTo);
+      router.push(`/login?returnTo=${encodeURIComponent(returnTo)}`);
+    },
+    [router, shareToken],
+  );
 
   useEffect(() => {
     let cancelled = false;
@@ -286,6 +347,19 @@ export default function PublicWishlistClient({ shareToken }: { shareToken: strin
     };
   }, [applyModel, connectionState, loadPublicModel]);
 
+  useEffect(() => {
+    if (!model) return;
+    if (activeItemId) return;
+
+    const fromQuery = searchParams.get("item")?.trim() || "";
+    if (!fromQuery) return;
+
+    const exists = model.items.some((item) => item.id === fromQuery);
+    if (exists) {
+      setActiveItemId(fromQuery);
+    }
+  }, [activeItemId, model, searchParams]);
+
   const filteredItems = useMemo(() => {
     if (!model) return [];
 
@@ -299,6 +373,124 @@ export default function PublicWishlistClient({ shareToken }: { shareToken: strin
       return true;
     });
   }, [availabilityFilter, fundingFilter, model, search]);
+
+  const activeItem = useMemo(() => {
+    if (!model || !activeItemId) return null;
+    return model.items.find((item) => item.id === activeItemId) || null;
+  }, [activeItemId, model]);
+
+  async function reserveAction(action: "reserve" | "unreserve") {
+    if (!activeItem) return;
+
+    const actorEmail = getAuthenticatedEmail();
+    if (!actorEmail) {
+      redirectToLoginForItem(activeItem.id);
+      return;
+    }
+
+    setIsMutating(true);
+    setActionError(null);
+    setActionSuccess(null);
+
+    let response: Response;
+    try {
+      response = await fetch(`/api/public/${encodeURIComponent(shareToken)}/reservations`, {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          "x-actor-email": actorEmail,
+          "x-idempotency-key": createIdempotencyKey(),
+        },
+        body: JSON.stringify({
+          itemId: activeItem.id,
+          action,
+        }),
+      });
+    } catch {
+      setIsMutating(false);
+      setActionError("Unable to complete this action. Please retry.");
+      return;
+    }
+
+    const payload = (await response.json()) as ReservationActionResponse;
+    setIsMutating(false);
+
+    if (!response.ok || !payload.ok) {
+      const message = payload && !payload.ok ? payload.error.message : "Unable to complete this action.";
+      setActionError(message);
+      return;
+    }
+
+    updateItemInModel(payload.item);
+    setActionSuccess(action === "reserve" ? "Item reserved." : "Reservation released.");
+  }
+
+  async function contributeAction() {
+    if (!activeItem) return;
+
+    const actorEmail = getAuthenticatedEmail();
+    if (!actorEmail) {
+      redirectToLoginForItem(activeItem.id);
+      return;
+    }
+
+    const amountCents = parseContributionToCents(contributionInput);
+    if (!Number.isInteger(amountCents) || amountCents < 100) {
+      setActionError("Contribution must be at least 1.00.");
+      return;
+    }
+
+    setIsMutating(true);
+    setActionError(null);
+    setActionSuccess(null);
+
+    let response: Response;
+    try {
+      response = await fetch(`/api/public/${encodeURIComponent(shareToken)}/contributions`, {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          "x-actor-email": actorEmail,
+          "x-idempotency-key": createIdempotencyKey(),
+        },
+        body: JSON.stringify({
+          itemId: activeItem.id,
+          amountCents,
+        }),
+      });
+    } catch {
+      setIsMutating(false);
+      setActionError("Unable to submit contribution. Please retry.");
+      return;
+    }
+
+    const payload = (await response.json()) as ContributionActionResponse;
+    setIsMutating(false);
+
+    if (!response.ok || !payload.ok) {
+      const message = payload && !payload.ok ? payload.error.message : "Unable to submit contribution.";
+      setActionError(message);
+      return;
+    }
+
+    updateItemInModel(payload.item);
+    setActionSuccess("Contribution saved.");
+    setContributionInput("");
+  }
+
+  function openModal(itemId: string) {
+    setActiveItemId(itemId);
+    setActionError(null);
+    setActionSuccess(null);
+    setContributionInput("");
+  }
+
+  function closeModal() {
+    setActiveItemId(null);
+    setActionError(null);
+    setActionSuccess(null);
+    setContributionInput("");
+  }
 
   return (
     <main className="mx-auto min-h-screen max-w-5xl px-4 py-8 sm:px-6 sm:py-10">
@@ -346,9 +538,14 @@ export default function PublicWishlistClient({ shareToken }: { shareToken: strin
                   <p className="mt-2 text-sm text-zinc-700">{model.wishlist.occasionNote}</p>
                 ) : null}
               </div>
-              <Link className="rounded-md border border-zinc-300 px-3 py-2 text-sm font-medium text-zinc-800" href="/login">
-                Sign in for actions
-              </Link>
+              <div className="flex flex-wrap gap-2">
+                <Link className="rounded-md border border-zinc-300 px-3 py-2 text-sm font-medium text-zinc-800" href="/me/activity">
+                  My activity
+                </Link>
+                <Link className="rounded-md border border-zinc-300 px-3 py-2 text-sm font-medium text-zinc-800" href="/login">
+                  Sign in
+                </Link>
+              </div>
             </div>
 
             <div className="mt-5 grid gap-3 sm:grid-cols-3">
@@ -398,7 +595,6 @@ export default function PublicWishlistClient({ shareToken }: { shareToken: strin
             ) : (
               filteredItems.map((item) => {
                 const progressPercent = Math.max(0, Math.min(100, Math.round(item.progressRatio * 100)));
-                const authHref = buildAuthReturnTo(shareToken, item.id);
 
                 return (
                   <article className="rounded-xl border border-zinc-200 bg-white p-4 shadow-sm" key={item.id}>
@@ -437,7 +633,8 @@ export default function PublicWishlistClient({ shareToken }: { shareToken: strin
                             <div className="flex items-center justify-between text-xs text-zinc-600">
                               <span>Funding progress</span>
                               <span>
-                                {formatMoney(item.fundedCents, model.wishlist.currency)} / {formatMoney(item.targetCents, model.wishlist.currency)}
+                                {formatMoney(item.fundedCents, model.wishlist.currency)} /{" "}
+                                {formatMoney(item.targetCents, model.wishlist.currency)}
                               </span>
                             </div>
                             <div className="mt-1 h-2 overflow-hidden rounded-full bg-zinc-100">
@@ -447,16 +644,21 @@ export default function PublicWishlistClient({ shareToken }: { shareToken: strin
                         ) : null}
 
                         <div className="mt-3 flex flex-wrap gap-2">
-                          <Link
+                          <button
                             className="rounded-md border border-zinc-300 px-3 py-2 text-sm font-medium text-zinc-800"
-                            href={authHref}
+                            onClick={() => openModal(item.id)}
+                            type="button"
                           >
-                            Reserve
-                          </Link>
+                            {item.availability === "available" ? "Reserve" : "View actions"}
+                          </button>
                           {item.isGroupFunded ? (
-                            <Link className="rounded-md bg-zinc-900 px-3 py-2 text-sm font-medium text-white" href={authHref}>
+                            <button
+                              className="rounded-md bg-zinc-900 px-3 py-2 text-sm font-medium text-white"
+                              onClick={() => openModal(item.id)}
+                              type="button"
+                            >
                               Contribute
-                            </Link>
+                            </button>
                           ) : null}
                         </div>
                       </div>
@@ -467,6 +669,91 @@ export default function PublicWishlistClient({ shareToken }: { shareToken: strin
             )}
           </section>
         </>
+      ) : null}
+
+      {activeItem ? (
+        <div className="fixed inset-0 z-50 flex items-end bg-black/40 p-3 sm:items-center sm:justify-center">
+          <div className="w-full max-w-lg rounded-2xl bg-white p-5 shadow-lg sm:p-6">
+            <div className="flex items-start justify-between gap-3">
+              <div>
+                <h2 className="text-lg font-semibold text-zinc-900">{activeItem.title}</h2>
+                <p className="mt-1 text-xs text-zinc-600">{formatMoney(activeItem.priceCents, model?.wishlist.currency || "USD")}</p>
+              </div>
+              <button className="rounded-md border border-zinc-300 px-2.5 py-1.5 text-xs font-medium text-zinc-800" onClick={closeModal} type="button">
+                Close
+              </button>
+            </div>
+
+            <section className="mt-4 rounded-xl border border-zinc-200 p-3">
+              <h3 className="text-sm font-semibold text-zinc-900">Reservation</h3>
+              <p className="mt-1 text-xs text-zinc-600">
+                Current status: {activeItem.availability === "available" ? "Available" : "Reserved"}
+              </p>
+              <div className="mt-3 flex flex-wrap gap-2">
+                <button
+                  className="rounded-md border border-zinc-300 px-3 py-2 text-sm font-medium text-zinc-800 disabled:opacity-60"
+                  disabled={isMutating}
+                  onClick={() => reserveAction("reserve")}
+                  type="button"
+                >
+                  Reserve
+                </button>
+                <button
+                  className="rounded-md border border-zinc-300 px-3 py-2 text-sm font-medium text-zinc-800 disabled:opacity-60"
+                  disabled={isMutating}
+                  onClick={() => reserveAction("unreserve")}
+                  type="button"
+                >
+                  Release my reservation
+                </button>
+              </div>
+            </section>
+
+            <section className="mt-3 rounded-xl border border-zinc-200 p-3">
+              <h3 className="text-sm font-semibold text-zinc-900">Contribution</h3>
+              {activeItem.isGroupFunded ? (
+                <>
+                  <p className="mt-1 text-xs text-zinc-600">Enter amount in dollars (minimum 1.00).</p>
+                  <div className="mt-3 flex flex-wrap items-center gap-2">
+                    <input
+                      className="w-32 rounded-md border border-zinc-300 px-3 py-2 text-sm outline-none focus:border-zinc-500"
+                      onChange={(event) => setContributionInput(event.target.value)}
+                      placeholder="10.00"
+                      value={contributionInput}
+                    />
+                    <button
+                      className="rounded-md bg-zinc-900 px-3 py-2 text-sm font-medium text-white disabled:opacity-60"
+                      disabled={isMutating}
+                      onClick={contributeAction}
+                      type="button"
+                    >
+                      Contribute
+                    </button>
+                  </div>
+                </>
+              ) : (
+                <p className="mt-1 text-xs text-zinc-600">This item is not group funded.</p>
+              )}
+            </section>
+
+            {actionError ? <p className="mt-3 text-sm text-rose-700">{actionError}</p> : null}
+            {actionSuccess ? <p className="mt-3 text-sm text-emerald-700">{actionSuccess}</p> : null}
+
+            {!getAuthenticatedEmail() ? (
+              <div className="mt-3 rounded-md border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-900">
+                Sign in to reserve or contribute. Your return to this item is preserved.
+                <div className="mt-2">
+                  <Link
+                    className="rounded-md border border-amber-300 px-2.5 py-1.5 font-medium"
+                    href={`/login?returnTo=${encodeURIComponent(buildAuthReturnTo(shareToken, activeItem.id))}`}
+                  >
+                    Sign in
+                  </Link>
+                </div>
+              </div>
+            ) : null}
+          </div>
+        </div>
       ) : null}
     </main>
   );

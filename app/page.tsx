@@ -1,66 +1,108 @@
-import Link from "next/link";
+"use client";
 
-const FEATURE_ROWS = [
-  { label: "Auth", value: "Email + password + reset" },
-  { label: "Owner flow", value: "Onboarding, wishlists, item editor" },
-  { label: "Public flow", value: "Share links, reserve, contribute" },
-  { label: "Ops", value: "Audit history and abuse controls" },
+import Link from "next/link";
+import { useEffect, useState } from "react";
+
+import { getAuthenticatedEmail } from "@/app/_lib/auth-client";
+
+const CELEBRATION_NOTES = [
+  "Picture your favorite surprise waiting for you, chosen with love by people who know you best.",
+  "Let family and friends quietly team up on the gift you have always dreamed about.",
+  "Feel the joy of being celebrated while every little detail stays beautifully effortless.",
 ];
 
 export default function Home() {
+  const [isAuthenticated, setIsAuthenticated] = useState(false);
+  const [isAuthResolved, setIsAuthResolved] = useState(false);
+
+  useEffect(() => {
+    let cancelled = false;
+
+    async function hydrateAuth() {
+      const email = await getAuthenticatedEmail();
+      if (cancelled) return;
+      setIsAuthenticated(Boolean(email));
+      setIsAuthResolved(true);
+    }
+
+    void hydrateAuth();
+
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
   return (
     <div className="min-h-screen">
       <main className="mx-auto w-full max-w-5xl px-4 py-8 sm:px-6 sm:py-10">
-        <section className="rounded-3xl border border-zinc-200 bg-white p-6 shadow-sm sm:p-8">
-          <h1 className="mt-3 text-3xl font-semibold tracking-tight text-zinc-950 sm:text-4xl">
-            Gift coordination without spoilers
+        <section className="relative overflow-hidden px-1 pb-4 pt-2 sm:pb-6">
+          <div className="pointer-events-none absolute -left-16 -top-10 h-52 w-52 rounded-full bg-sky-200/55 blur-3xl" />
+          <div className="pointer-events-none absolute -right-12 top-16 h-44 w-44 rounded-full bg-emerald-200/45 blur-3xl" />
+
+          <h1 className="max-w-4xl text-4xl font-semibold tracking-tight sm:text-5xl">
+            Celebrate your moments with gifts chosen from the heart
           </h1>
-          <p className="mt-3 max-w-2xl text-sm text-zinc-700 sm:text-base">
-            Owners share one link, friends reserve or pledge in real time, and identities stay hidden from the owner.
+          <p className="mt-4 max-w-3xl text-base leading-relaxed text-zinc-700 sm:text-lg">
+            Your birthday, anniversary, or special day feels even brighter when the people you love can secretly prepare
+            something you truly wish for. Every message, every contribution, every kind choice becomes part of one
+            unforgettable celebration.
           </p>
 
-          <div className="mt-5 flex flex-wrap gap-2">
-            <Link
-              className="inline-flex items-center rounded-md bg-zinc-900 px-4 py-2 text-sm font-medium text-white"
-              href="/signup"
-            >
-              Create account
-            </Link>
-            <Link
-              className="inline-flex items-center rounded-md border border-zinc-300 px-4 py-2 text-sm font-medium text-zinc-900"
-              href="/login"
-            >
-              Sign in
-            </Link>
+          <div className="mt-6 flex flex-wrap gap-3">
+            {isAuthResolved ? (
+              isAuthenticated ? (
+                <>
+                  <Link className="btn-notch btn-notch--ink" href="/wishlists">
+                    Open my wishlist
+                  </Link>
+                  <Link className="btn-notch" href="/onboarding">
+                    Start a new celebration
+                  </Link>
+                </>
+              ) : (
+                <>
+                  <Link className="btn-notch btn-notch--ink" href="/signup">
+                    Create account
+                  </Link>
+                  <Link className="btn-notch" href="/login">
+                    Sign in
+                  </Link>
+                </>
+              )
+            ) : (
+              <Link className="btn-notch btn-notch--ink" href="/wishlists">
+                Open my wishlist
+              </Link>
+            )}
           </div>
         </section>
 
-        <section className="mt-6 grid gap-4 lg:grid-cols-[1.1fr_0.9fr]">
-          <article className="rounded-2xl border border-zinc-200 bg-white p-5 shadow-sm">
-            <h2 className="text-sm font-semibold uppercase tracking-[0.14em] text-zinc-600">Quick links</h2>
-            <div className="mt-4 grid gap-2 sm:grid-cols-2">
-              <Link className="rounded-lg border border-zinc-300 px-3 py-3 text-sm font-medium text-zinc-900" href="/wishlists">
+        <section className="mt-8 grid gap-8 lg:grid-cols-[1.1fr_0.9fr]">
+          <article className="px-1">
+            <h2 className="text-sm font-semibold uppercase tracking-[0.15em] text-zinc-700">Your Celebration Flow</h2>
+            <div className="mt-4 grid gap-3 sm:grid-cols-2">
+              <Link className="btn-notch w-full justify-center" href="/wishlists">
                 My wishlists
               </Link>
-              <Link className="rounded-lg border border-zinc-300 px-3 py-3 text-sm font-medium text-zinc-900" href="/onboarding">
+              <Link className="btn-notch w-full justify-center" href="/onboarding">
                 Start onboarding
               </Link>
-              <Link className="rounded-lg border border-zinc-300 px-3 py-3 text-sm font-medium text-zinc-900" href="/me/activity">
+              <Link className="btn-notch w-full justify-center" href="/me/activity">
                 My activity
               </Link>
-              <Link className="rounded-lg border border-zinc-300 px-3 py-3 text-sm font-medium text-zinc-900" href="/admin/abuse">
-                Admin abuse tools
+              <Link className="btn-notch w-full justify-center" href="/admin/abuse">
+                Admin tools
               </Link>
             </div>
           </article>
 
-          <article className="rounded-2xl border border-zinc-200 bg-zinc-50 p-5">
-            <h2 className="text-sm font-semibold uppercase tracking-[0.14em] text-zinc-600">Current capabilities</h2>
-            <ul className="mt-4 space-y-2">
-              {FEATURE_ROWS.map((row) => (
-                <li className="rounded-lg border border-zinc-200 bg-white px-3 py-2" key={row.label}>
-                  <p className="text-xs font-medium uppercase tracking-[0.1em] text-zinc-500">{row.label}</p>
-                  <p className="mt-1 text-sm text-zinc-800">{row.value}</p>
+          <article className="px-1">
+            <h2 className="text-sm font-semibold uppercase tracking-[0.15em] text-zinc-700">Why It Feels Special</h2>
+            <ul className="mt-4 space-y-3 text-sm leading-relaxed text-zinc-700 sm:text-base">
+              {CELEBRATION_NOTES.map((note) => (
+                <li className="relative pl-6" key={note}>
+                  <span className="absolute left-0 top-2 h-2.5 w-2.5 rounded-full bg-sky-500" />
+                  {note}
                 </li>
               ))}
             </ul>

@@ -2,6 +2,10 @@
 
 :root {
   color-scheme: light;
+  --wish-header-blue: #163f9f;
+  --wish-btn-grad-main: linear-gradient(100deg, #2563eb 0%, #0ea5e9 100%);
+  --wish-btn-grad-warm: linear-gradient(100deg, #ec4899 0%, #f59e0b 100%);
+  --wish-btn-grad-cool: linear-gradient(100deg, #7c3aed 0%, #2563eb 100%);
 }
 
 body {
@@ -10,21 +14,59 @@ body {
   font-family: "Helvetica Neue", Helvetica, Arial, sans-serif;
 }
 
+h1,
+h2,
+h3,
+h4,
+h5,
+h6 {
+  color: var(--wish-header-blue) !important;
+}
+
+.cursor-stars-layer {
+  pointer-events: none;
+  position: fixed;
+  inset: 0;
+  z-index: 80;
+}
+
+.cursor-star {
+  position: fixed;
+  border-radius: 2px;
+  background: linear-gradient(140deg, var(--star-color-a) 0%, var(--star-color-b) 100%);
+  clip-path: polygon(50% 0, 62% 34%, 100% 50%, 62% 66%, 50% 100%, 38% 66%, 0 50%, 38% 34%);
+  filter: drop-shadow(0 0 6px rgba(255, 255, 255, 0.7));
+  animation: cursor-star-fade 420ms ease-out forwards;
+  will-change: transform, opacity;
+}
+
+@keyframes cursor-star-fade {
+  0% {
+    opacity: 0.95;
+    transform: translate(-50%, -50%) scale(1) rotate(0deg);
+  }
+
+  100% {
+    opacity: 0;
+    transform: translate(calc(-50% + var(--star-dx)), calc(-50% + var(--star-dy))) scale(0.38) rotate(var(--star-rot));
+  }
+}
+
 .btn-notch {
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  border: 1px solid #9ca3af;
-  background: rgba(255, 255, 255, 0.9);
-  color: #1f2937;
-  padding: 0.5rem 1rem;
-  min-height: 2.4rem;
+  border: 1px solid #1d4ed8;
+  background: var(--wish-btn-grad-main);
+  color: #ffffff;
+  padding: 0.58rem 1.1rem;
+  min-height: 2.45rem;
   font-size: 0.92rem;
   font-weight: 650;
   line-height: 1;
   letter-spacing: 0.01em;
   text-decoration: none;
-  clip-path: polygon(10px 0, calc(100% - 10px) 0, 100% 50%, calc(100% - 10px) 100%, 10px 100%, 0 50%);
+  border-radius: 9999px;
   box-shadow: 3px 3px 0 rgba(15, 23, 42, 0.24);
   transition: transform 120ms ease, box-shadow 120ms ease, filter 120ms ease;
 }
@@ -52,22 +94,29 @@ body {
 }
 
 .btn-notch--ink {
-  border-color: #111827;
-  background: #111827;
+  border-color: #1e40af;
+  background: var(--wish-btn-grad-cool);
   color: #ffffff;
-  box-shadow: 3px 3px 0 rgba(17, 24, 39, 0.34);
+  box-shadow: 3px 3px 0 rgba(37, 99, 235, 0.3);
 }
 
 .btn-notch--rose {
-  border-color: #fda4af;
-  background: #fff1f2;
-  color: #be123c;
-  box-shadow: 3px 3px 0 rgba(244, 63, 94, 0.2);
+  border-color: #ec4899;
+  background: var(--wish-btn-grad-warm);
+  color: #ffffff;
+  box-shadow: 3px 3px 0 rgba(236, 72, 153, 0.28);
 }
 
 .btn-notch--gradient {
-  border-color: #7c3aed;
-  background: linear-gradient(90deg, #7c3aed 0%, #06b6d4 50%, #f97316 100%);
+  border-color: #2563eb;
+  background: var(--wish-btn-grad-main);
   color: #ffffff;
-  box-shadow: 3px 3px 0 rgba(124, 58, 237, 0.34);
+  box-shadow: 3px 3px 0 rgba(37, 99, 235, 0.3);
+}
+
+button.bg-zinc-900,
+a.bg-zinc-900 {
+  background: var(--wish-btn-grad-main) !important;
+  border-color: #1d4ed8 !important;
+  color: #ffffff !important;
 }

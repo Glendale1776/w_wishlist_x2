@@ -27,6 +27,7 @@ function WishlistsContent() {
   const [isLoading, setIsLoading] = useState(true);
   const [loadError, setLoadError] = useState<string | null>(null);
   const [list, setList] = useState<WishlistPreview[]>([]);
+  const [deletingWishlistId, setDeletingWishlistId] = useState<string | null>(null);
 
   const search = searchParams.get("search") || "";
   const sort = parseWishlistSort(searchParams.get("sort"));
@@ -134,6 +135,60 @@ function WishlistsContent() {
     }
   }
 
+  async function deleteWishlist(item: WishlistPreview) {
+    const confirmed = window.confirm(
+      `Delete "${item.title}"?\n\nThis will permanently delete the wishlist, all its items, and its share link.`,
+    );
+    if (!confirmed) return;
+
+    const ownerEmail = await getAuthenticatedEmail();
+    if (!ownerEmail) {
+      persistReturnTo("/wishlists");
+      router.replace("/login?returnTo=/wishlists");
+      return;
+    }
+
+    setDeletingWishlistId(item.id);
+
+    let response: Response;
+    try {
+      response = await fetch(`/api/wishlists/${encodeURIComponent(item.id)}`, {
+        method: "DELETE",
+        headers: {
+          "x-owner-email": ownerEmail,
+        },
+      });
+    } catch {
+      setDeletingWishlistId(null);
+      setToast({ kind: "error", message: "Unable to delete wishlist right now. Please retry." });
+      return;
+    }
+
+    const payload = (await response.json()) as
+      | {
+          ok: true;
+          deletedWishlistId: string;
+        }
+      | ApiErrorResponse;
+
+    setDeletingWishlistId(null);
+
+    if (!response.ok || !payload.ok) {
+      if (response.status === 401) {
+        persistReturnTo("/wishlists");
+        router.replace("/login?returnTo=/wishlists");
+        return;
+      }
+
+      const message = payload && !payload.ok ? payload.error.message : "Unable to delete wishlist right now.";
+      setToast({ kind: "error", message });
+      return;
+    }
+
+    setList((current) => current.filter((entry) => entry.id !== payload.deletedWishlistId));
+    setToast({ kind: "success", message: "Wishlist deleted." });
+  }
+
   return (
     <main className="mx-auto min-h-screen max-w-4xl px-4 py-8 sm:px-6 sm:py-10">
       {toast ? (
@@ -233,6 +288,14 @@ function WishlistsContent() {
                   type="button"
                 >
                   Copy share link
+                </button>
+                <button
+                  className="btn-notch btn-notch--rose"
+                  disabled={deletingWishlistId === item.id}
+                  onClick={() => void deleteWishlist(item)}
+                  type="button"
+                >
+                  {deletingWishlistId === item.id ? "Deleting..." : "Delete wishlist"}
                 </button>
               </div>
             </article>

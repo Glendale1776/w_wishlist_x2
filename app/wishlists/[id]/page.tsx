@@ -268,10 +268,11 @@ export default function WishlistEditorPage() {
   }, [activeItems, editingItemId, form.url]);
 
   const activeEditPreviewUrl = useMemo(() => {
+    const firstDraftImage = form.imageUrls[0] || null;
     if (pendingImages[0]?.previewUrl) return pendingImages[0].previewUrl;
-    if (!editingItemId) return null;
-    return imagePreviewByItemId[editingItemId]?.[0] || null;
-  }, [editingItemId, imagePreviewByItemId, pendingImages]);
+    if (!editingItemId) return firstDraftImage;
+    return imagePreviewByItemId[editingItemId]?.[0] || firstDraftImage;
+  }, [editingItemId, form.imageUrls, imagePreviewByItemId, pendingImages]);
 
   const activeImageCount = form.imageUrls.length + pendingImages.length;
 
@@ -900,16 +901,16 @@ export default function WishlistEditorPage() {
       if (metadataImageUrls.length === 0 && fallbackSingleImage) {
         metadataImageUrls.push(fallbackSingleImage);
       }
-      const mergedImageUrls = Array.from(new Set([...prev.imageUrls, ...metadataImageUrls])).slice(
-        0,
-        CLIENT_MAX_ITEM_IMAGES,
-      );
+      const nextImageUrls =
+        metadataImageUrls.length > 0
+          ? Array.from(new Set(metadataImageUrls)).slice(0, CLIENT_MAX_ITEM_IMAGES)
+          : prev.imageUrls;
 
       return {
         ...prev,
         title: payload.metadata.title || prev.title,
         description: payload.metadata.description || prev.description,
-        imageUrls: mergedImageUrls,
+        imageUrls: nextImageUrls,
         price: priceFromMeta,
         target: nextTarget,
       };

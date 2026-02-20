@@ -12,7 +12,12 @@ export type WishlistPreview = {
   shareUrlPreview: string;
 };
 
-export type ApiErrorCode = "AUTH_REQUIRED" | "VALIDATION_ERROR" | "INTERNAL_ERROR";
+export type ApiErrorCode =
+  | "AUTH_REQUIRED"
+  | "VALIDATION_ERROR"
+  | "FORBIDDEN"
+  | "NOT_FOUND"
+  | "INTERNAL_ERROR";
 
 export type ApiErrorResponse = {
   ok: false;

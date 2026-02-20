@@ -1015,3 +1015,37 @@ export function pruneItemAuditEvents(input: { retentionDays: number }) {
     retentionDays: safeRetentionDays,
   };
 }
+
+export function deleteItemsForWishlist(input: { wishlistId: string; ownerEmail: string }) {
+  const store = getStore();
+  const itemIds = new Set(
+    store.items
+      .filter((item) => item.wishlistId === input.wishlistId && item.ownerEmail === input.ownerEmail)
+      .map((item) => item.id),
+  );
+
+  if (itemIds.size === 0) {
+    return { deletedCount: 0 };
+  }
+
+  for (const item of store.items) {
+    if (!itemIds.has(item.id)) continue;
+    for (const imageRef of getItemImageUrls(item)) {
+      if (isStorageRef(imageRef)) {
+        removeImageByPath(parseStoragePath(imageRef));
+      }
+    }
+  }
+
+  store.items = store.items.filter((item) => !itemIds.has(item.id));
+  store.images = store.images.filter((image) => !itemIds.has(image.itemId));
+  store.uploadTickets = store.uploadTickets.filter((ticket) => !itemIds.has(ticket.itemId));
+  store.previewTickets = store.previewTickets.filter((ticket) => !itemIds.has(ticket.itemId));
+  store.reservations = store.reservations.filter((reservation) => !itemIds.has(reservation.itemId));
+  store.contributions = store.contributions.filter((contribution) => !itemIds.has(contribution.itemId));
+  store.auditEvents = store.auditEvents.filter(
+    (event) => event.wishlistId !== input.wishlistId && !itemIds.has(event.entityId),
+  );
+
+  return { deletedCount: itemIds.size };
+}

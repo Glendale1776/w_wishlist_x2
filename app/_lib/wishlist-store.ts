@@ -453,3 +453,28 @@ export function pruneShareLinkAuditEvents(input: { retentionDays: number }) {
     retentionDays: safeRetentionDays,
   };
 }
+
+export type DeleteWishlistError = "NOT_FOUND" | "FORBIDDEN";
+
+export function deleteWishlistRecord(input: { wishlistId: string; ownerEmail: string }) {
+  const store = getStore();
+  const index = store.wishlists.findIndex((wishlist) => wishlist.id === input.wishlistId);
+  if (index === -1) {
+    return { error: "NOT_FOUND" as DeleteWishlistError };
+  }
+
+  const found = store.wishlists[index];
+  if (found.ownerEmail !== input.ownerEmail) {
+    return { error: "FORBIDDEN" as DeleteWishlistError };
+  }
+
+  store.wishlists.splice(index, 1);
+  delete store.shareTokensByHash[found.shareTokenHash];
+  store.shareLinkAuditEvents = store.shareLinkAuditEvents.filter((event) => event.wishlistId !== found.id);
+  store.rotationIdempotency = store.rotationIdempotency.filter((entry) => !entry.key.startsWith(`${found.id}:`));
+
+  return {
+    ok: true as const,
+    wishlistId: found.id,
+  };
+}

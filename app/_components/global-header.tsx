@@ -28,6 +28,8 @@ export function GlobalHeader() {
   }, [pathname]);
 
   const isAuthenticated = Boolean(email);
+  const isWishlistsActive = pathname.startsWith("/wishlists");
+  const isActivityActive = pathname.startsWith("/me/activity");
 
   async function handleSignOut() {
     await signOut();
@@ -38,23 +40,34 @@ export function GlobalHeader() {
 
   return (
     <header className="fixed inset-x-0 top-0 z-50 w-full border-b border-sky-200 bg-[linear-gradient(90deg,#fef3c7_0%,#e0f2fe_48%,#fce7f3_100%)] shadow-sm backdrop-blur">
-      <div className="mx-auto flex w-full max-w-6xl flex-wrap items-center justify-between gap-3 px-4 py-3 sm:px-6">
-        <Link href="/">
+      <div className="mx-auto flex w-full max-w-4xl items-center gap-4 px-4 py-3 sm:px-6">
+        <Link className="shrink-0" href="/">
           <Image alt="I WISH ..." className="h-10 w-auto sm:h-12" height={360} priority src="/logo-wordmark.svg" width={1200} />
         </Link>
 
-        <nav className="flex flex-wrap items-center gap-2">
+        <nav
+          className={
+            isAuthenticated
+              ? "ml-auto flex flex-wrap items-end justify-end gap-x-6 gap-y-1 sm:gap-x-10"
+              : "ml-auto flex flex-wrap items-center gap-2"
+          }
+        >
           {isAuthenticated ? (
             <>
-              <Link className="btn-notch" href="/wishlists">
+              <Link className={`header-nav-link ${isWishlistsActive ? "header-nav-link--active" : ""}`} href="/wishlists">
                 My wishlists
               </Link>
-              <Link className="btn-notch" href="/me/activity">
+              <Link className={`header-nav-link ${isActivityActive ? "header-nav-link--active" : ""}`} href="/me/activity">
                 My activity
               </Link>
-              <button className="btn-notch btn-notch--rose" onClick={() => void handleSignOut()} type="button">
-                Log out
-              </button>
+              <div className="flex flex-col items-end">
+                <span className="header-nav-account-badge" title={email || undefined}>
+                  {email}
+                </span>
+                <button className="header-nav-link header-nav-link--danger" onClick={() => void handleSignOut()} type="button">
+                  Log out
+                </button>
+              </div>
             </>
           ) : (
             <>

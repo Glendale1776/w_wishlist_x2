@@ -9,9 +9,10 @@ const DEFAULT_OPENAI_TIMEOUT_MS = 9000;
 const DEFAULT_OPENAI_MODEL = "gpt-4o-mini";
 const MAX_TEXT_CHARS = 12_000;
 const MAX_IMAGE_CANDIDATES = 30;
-const MAX_IMAGE_RETURN = 10;
+const MAX_IMAGE_RETURN = 8;
 const TITLE_MAX = 120;
 const DESCRIPTION_MAX = 600;
+const AMAZON_HOST_REGEX = /(^|\.)amazon\./i;
 
 function errorResponse(status: number, code: string, message: string, fieldErrors?: Record<string, string>) {
   return NextResponse.json(
@@ -148,11 +149,205 @@ function cleanDescription(value: string | null): string | null {
   return trimmed.slice(0, DESCRIPTION_MAX);
 }
 
+function looksLikeMarketplaceOnlyText(value: string | null, parsed: URL): boolean {
+  const normalized = (value || "").trim().toLowerCase();
+  if (!normalized) return true;
+  const host = parsed.hostname.toLowerCase();
+
+  if (AMAZON_HOST_REGEX.test(host)) {
+    return normalized === "amazon" || normalized === "amazon.com";
+  }
+
+  return false;
+}
+
+function sanitizeMarketplaceTitle(value: string | null, parsed: URL): string | null {
+  if (!value) return null;
+  let normalized = value.trim();
+  const host = parsed.hostname.toLowerCase();
+
+  if (AMAZON_HOST_REGEX.test(host)) {
+    normalized = normalized.replace(/^amazon\.com:\s*/i, "");
+    const categoryDivider = normalized.lastIndexOf(" : ");
+    if (categoryDivider > 8) {
+      normalized = normalized.slice(0, categoryDivider).trim();
+    }
+    if (/^amazon(\.com)?$/i.test(normalized)) {
+      return null;
+    }
+  }
+
+  return cleanTitle(normalized);
+}
+
+function pickBestTitle(primary: string | null, fallback: string | null): string | null {
+  const safePrimary = cleanTitle(primary);
+  const safeFallback = cleanTitle(fallback);
+  if (!safePrimary) return safeFallback;
+  if (!safeFallback) return safePrimary;
+
+  // If AI returns a short slug-like title but fallback has richer product wording, keep fallback.
+  if (safePrimary.length < 42 && safeFallback.length - safePrimary.length >= 14) {
+    return safeFallback;
+  }
+
+  return safePrimary;
+}
+
+function titleFromPathSlug(parsed: URL): string | null {
+  const segments = parsed.pathname.split("/").filter(Boolean);
+  if (segments.length === 0) return null;
+
+  const dpIndex = segments.findIndex((segment) => segment.toLowerCase() === "dp");
+  const rawSlug = dpIndex > 0 ? segments[dpIndex - 1] : segments[segments.length - 1];
+  if (!rawSlug) return null;
+  if (/^[A-Z0-9]{10}$/i.test(rawSlug)) return null;
+
+  const normalized = decodeURIComponent(rawSlug)
+    .replace(/\+/g, " ")
+    .replace(/[-_]+/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+
+  return cleanTitle(normalized);
+}
+
+function extractPriceCentsFromText(text: string): number | null {
+  const matches = Array.from(text.matchAll(/(?:US?\$|\$)\s*([0-9]{1,4}(?:,[0-9]{3})*(?:\.[0-9]{2})?)/g));
+  for (const match of matches) {
+    const raw = match[1];
+    const cents = parsePriceToCents(raw);
+    if (cents !== null) return cents;
+  }
+  return null;
+}
+
+function isLikelyDecorativeImageUrl(imageUrl: string): boolean {
+  const lower = imageUrl.toLowerCase();
+  if (lower.includes("sprite")) return true;
+  if (lower.includes("logo")) return true;
+  if (lower.includes("icon")) return true;
+  if (lower.includes("pixel")) return true;
+  if (lower.includes("tracking")) return true;
+  if (lower.includes("fls-na.amazon.com")) return true;
+  if (lower.endsWith(".svg")) return true;
+  return false;
+}
+
+function rankCandidateImageUrls(urls: string[], pageUrl: URL): string[] {
+  const filtered = urls.filter((url) => !isLikelyDecorativeImageUrl(url));
+  if (filtered.length === 0) return urls;
+
+  const host = pageUrl.hostname.toLowerCase();
+  if (!AMAZON_HOST_REGEX.test(host)) {
+    return filtered;
+  }
+
+  const amazonProductImages = filtered.filter((url) => {
+    try {
+      const parsed = new URL(url);
+      if (parsed.hostname.toLowerCase() !== "m.media-amazon.com") return false;
+      if (!/\/images\/i\//i.test(parsed.pathname)) return false;
+      if (!/\.(jpe?g|webp)$/i.test(parsed.pathname)) return false;
+      return true;
+    } catch {
+      return false;
+    }
+  });
+
+  if (amazonProductImages.length === 0) {
+    return filtered;
+  }
+
+  return [...amazonProductImages].sort((a, b) => {
+    const aScore = /_ac_sx\d+_/i.test(a) || /_ac_sy\d+_/i.test(a) ? 2 : /_ac_us100_/i.test(a) ? 0 : 1;
+    const bScore = /_ac_sx\d+_/i.test(b) || /_ac_sy\d+_/i.test(b) ? 2 : /_ac_us100_/i.test(b) ? 0 : 1;
+    return bScore - aScore;
+  });
+}
+
+function isLikelyBotBlockPage(html: string, parsed: URL, fallbackTitle: string | null): boolean {
+  if (!AMAZON_HOST_REGEX.test(parsed.hostname)) return false;
+  const lowerHtml = html.toLowerCase();
+  const lowerTitle = (fallbackTitle || "").trim().toLowerCase();
+
+  if (lowerTitle === "amazon.com" || lowerTitle === "amazon") return true;
+  if (lowerHtml.includes("opfcaptcha.amazon.com")) return true;
+  if (lowerHtml.includes("errors/validatecaptcha")) return true;
+  if (lowerHtml.includes("continue shopping")) return true;
+  if (lowerHtml.includes("automated access to amazon data")) return true;
+  return false;
+}
+
+function buildReaderMirrorUrl(sourceUrl: string): string {
+  return `https://r.jina.ai/http://${sourceUrl.replace(/^https?:\/\//i, "")}`;
+}
+
+async function fetchMirrorMarkdown(sourceUrl: string, timeoutMs: number): Promise<string | null> {
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), timeoutMs);
+
+  try {
+    const response = await fetch(buildReaderMirrorUrl(sourceUrl), {
+      method: "GET",
+      signal: controller.signal,
+      headers: {
+        "user-agent": "WWishListBot/1.0 (+metadata)",
+      },
+    });
+
+    if (!response.ok) return null;
+    const text = await response.text();
+    return text.trim() || null;
+  } catch {
+    return null;
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
+function fallbackMetadataFromMirror(markdown: string, pageUrl: URL) {
+  const titleMatch = markdown.match(/^Title:\s*(.+)$/im);
+  const title = titleMatch?.[1]?.trim() || null;
+
+  const aboutSection =
+    markdown.match(/\nAbout this item\s*\n=+\s*\n([\s\S]{0,2600})/i)?.[1] ||
+    markdown.match(/\nAbout this item\s*\n([\s\S]{0,2600})/i)?.[1] ||
+    "";
+  const aboutBullets = Array.from(aboutSection.matchAll(/^\*\s+(.+)$/gm))
+    .map((match) => match[1].trim())
+    .filter(
+      (line) =>
+        line.length >= 24 &&
+        !/^See more product details/i.test(line) &&
+        !/\[[^\]]+\]\(http/i.test(line),
+    );
+  const descriptionFromBullets =
+    aboutBullets.length > 0 ? cleanDescription(aboutBullets.slice(0, 2).join(" ")) : null;
+  const buyLineDescription =
+    markdown.match(/\bBuy\s+(.+?)\s*:\s*[^-\n]+-\s*Amazon\.com/i)?.[1]?.trim() || null;
+  const description = cleanDescription(descriptionFromBullets || buyLineDescription);
+
+  const imageCandidates = [
+    ...Array.from(markdown.matchAll(/!\[[^\]]*\]\((https?:\/\/[^)\s]+)\)/g)).map((match) => match[1]),
+    ...Array.from(markdown.matchAll(/https?:\/\/[^\s)]+/g)).map((match) => match[0]),
+  ];
+
+  return {
+    title: sanitizeMarketplaceTitle(title, pageUrl),
+    description,
+    priceCents: extractPriceCentsFromText(markdown),
+    imageUrls: rankCandidateImageUrls(normalizeImageUrls(imageCandidates, pageUrl), pageUrl),
+    sourceText: markdown.slice(0, MAX_TEXT_CHARS),
+  };
+}
+
 function fallbackMetadata(html: string, pageUrl: URL) {
   const title =
+    extractMeta(html, /<meta\s+name=["']title["']\s+content=["']([^"']+)["']/i) ||
+    extractMeta(html, /<title[^>]*>([^<]+)<\/title>/i) ||
     extractMeta(html, /<meta\s+property=["']og:title["']\s+content=["']([^"']+)["']/i) ||
-    extractMeta(html, /<meta\s+name=["']twitter:title["']\s+content=["']([^"']+)["']/i) ||
-    extractMeta(html, /<title[^>]*>([^<]+)<\/title>/i);
+    extractMeta(html, /<meta\s+name=["']twitter:title["']\s+content=["']([^"']+)["']/i);
 
   const description =
     extractMeta(html, /<meta\s+property=["']og:description["']\s+content=["']([^"']+)["']/i) ||
@@ -171,11 +366,15 @@ function fallbackMetadata(html: string, pageUrl: URL) {
     ...extractAll(html, /<img[^>]+data-src=["']([^"']+)["']/gi),
   ];
 
+  const cleanedDescription = looksLikeMarketplaceOnlyText(description, pageUrl)
+    ? null
+    : cleanDescription(description);
+
   return {
-    title: cleanTitle(title),
-    description: cleanDescription(description),
+    title: sanitizeMarketplaceTitle(title, pageUrl),
+    description: cleanedDescription,
     priceCents: parsePriceToCents(priceFromMeta),
-    imageUrls: normalizeImageUrls(imageCandidates, pageUrl),
+    imageUrls: rankCandidateImageUrls(normalizeImageUrls(imageCandidates, pageUrl), pageUrl),
   };
 }
 
@@ -402,8 +601,29 @@ export async function POST(request: NextRequest) {
 
     const html = await response.text();
     const fallback = fallbackMetadata(html, parsed);
-    const candidateImageUrls = fallback.imageUrls.slice(0, MAX_IMAGE_CANDIDATES);
-    const pageText = htmlToText(html);
+    let sourceText = htmlToText(html);
+    let titleHint = fallback.title || titleFromPathSlug(parsed);
+    let descriptionHint = fallback.description;
+    let priceHintCents = fallback.priceCents ?? extractPriceCentsFromText(sourceText);
+    let candidateImageUrls = fallback.imageUrls.slice(0, MAX_IMAGE_CANDIDATES);
+
+    const shouldUseMirror =
+      AMAZON_HOST_REGEX.test(parsed.hostname) ||
+      isLikelyBotBlockPage(html, parsed, fallback.title);
+
+    if (shouldUseMirror) {
+      const mirrorMarkdown = await fetchMirrorMarkdown(parsed.toString(), 6500);
+      if (mirrorMarkdown) {
+        const mirrorFallback = fallbackMetadataFromMirror(mirrorMarkdown, parsed);
+        sourceText = mirrorFallback.sourceText || sourceText;
+        titleHint = mirrorFallback.title || titleHint || titleFromPathSlug(parsed);
+        descriptionHint = mirrorFallback.description || descriptionHint;
+        priceHintCents = mirrorFallback.priceCents ?? priceHintCents;
+        if (mirrorFallback.imageUrls.length > 0) {
+          candidateImageUrls = mirrorFallback.imageUrls.slice(0, MAX_IMAGE_CANDIDATES);
+        }
+      }
+    }
 
     if (!openAiApiKey) {
       logMetadataFailure({
@@ -419,11 +639,11 @@ export async function POST(request: NextRequest) {
       openAiModel,
       openAiTimeoutMs: Number.isFinite(openAiTimeoutMs) && openAiTimeoutMs > 0 ? openAiTimeoutMs : DEFAULT_OPENAI_TIMEOUT_MS,
       sourceUrl: parsed.toString(),
-      pageText,
+      pageText: sourceText,
       candidateImageUrls,
-      fallbackTitle: fallback.title,
-      fallbackDescription: fallback.description,
-      fallbackPriceCents: fallback.priceCents,
+      fallbackTitle: titleHint,
+      fallbackDescription: descriptionHint,
+      fallbackPriceCents: priceHintCents,
     });
 
     if (!aiMetadata) {
@@ -434,13 +654,28 @@ export async function POST(request: NextRequest) {
       });
     }
 
+    const aiImageUrls =
+      aiMetadata && aiMetadata.imageUrls.length > 0
+        ? rankCandidateImageUrls(normalizeImageUrls(aiMetadata.imageUrls, parsed), parsed)
+        : [];
     const mergedImageUrls = normalizeImageUrls(
-      aiMetadata && aiMetadata.imageUrls.length > 0 ? aiMetadata.imageUrls : candidateImageUrls,
+      aiImageUrls.length > 0 ? aiImageUrls : candidateImageUrls,
       parsed,
     ).slice(0, MAX_IMAGE_RETURN);
-    const title = cleanTitle(aiMetadata?.title || fallback.title);
-    const description = cleanDescription(aiMetadata?.description || fallback.description);
-    const priceCents = parseNumberPriceToCents(aiMetadata?.price ?? null) ?? fallback.priceCents;
+
+    const fallbackTitle = titleHint || titleFromPathSlug(parsed);
+    const title = pickBestTitle(sanitizeMarketplaceTitle(aiMetadata?.title || null, parsed), fallbackTitle);
+
+    const rawDescription = aiMetadata?.description || descriptionHint;
+    const description = looksLikeMarketplaceOnlyText(rawDescription, parsed) ? null : cleanDescription(rawDescription);
+
+    const aiPriceCents = parseNumberPriceToCents(aiMetadata?.price ?? null);
+    const trustworthyAiPrice =
+      aiPriceCents !== null &&
+      (priceHintCents === null || (aiPriceCents >= Math.round(priceHintCents * 0.5) && aiPriceCents <= Math.round(priceHintCents * 2)));
+    const priceCents = trustworthyAiPrice
+      ? aiPriceCents
+      : priceHintCents ?? aiPriceCents ?? extractPriceCentsFromText(sourceText);
 
     return NextResponse.json({
       ok: true as const,

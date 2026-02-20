@@ -836,10 +836,13 @@ function buildPublicItemReadModel(
   const fundedCents = options?.fundedCents ?? fundedCentsForItem(item.id);
   const contributorCount = options?.contributorCount ?? contributorCountForItem(item.id);
   const activeReservation = activeReservationForItem(item.id);
-  const ratio =
-    item.isGroupFunded && item.targetCents && item.targetCents > 0
-      ? Math.min(fundedCents, item.targetCents) / item.targetCents
-      : 0;
+  const effectiveTargetCents =
+    item.isGroupFunded && item.targetCents !== null && item.targetCents > 0
+      ? item.targetCents
+      : item.isGroupFunded && item.priceCents !== null && item.priceCents > 0
+        ? item.priceCents
+        : null;
+  const ratio = effectiveTargetCents !== null ? Math.min(fundedCents, effectiveTargetCents) / effectiveTargetCents : 0;
 
   return {
     id: item.id,
@@ -849,7 +852,7 @@ function buildPublicItemReadModel(
     imageUrl: item.imageUrl,
     priceCents: item.priceCents,
     isGroupFunded: item.isGroupFunded,
-    targetCents: item.targetCents,
+    targetCents: effectiveTargetCents,
     fundedCents,
     contributorCount,
     progressRatio: ratio,
@@ -1156,7 +1159,7 @@ export async function resolveGroupFundingShortfall(input: {
 
   if (owned.archivedAt) return { error: "ARCHIVED" as ResolveShortfallError };
   if (!owned.isGroupFunded) return { error: "NOT_GROUP_FUNDED" as ResolveShortfallError };
-  if (owned.targetCents === null) return { error: "TARGET_UNSET" as ResolveShortfallError };
+  if (owned.targetCents === null || owned.targetCents <= 0) return { error: "TARGET_UNSET" as ResolveShortfallError };
 
   const stats = buildContributionStatsByItem(await listContributionRowsByItemIds([owned.id])).get(owned.id) || {
     fundedCents: 0,

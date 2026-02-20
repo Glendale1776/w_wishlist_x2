@@ -75,8 +75,8 @@ function validatePayload(body: ItemPayload) {
     fieldErrors.priceCents = "Price must be a non-negative integer in cents.";
   }
 
-  if (targetCents !== null && (!Number.isInteger(targetCents) || targetCents < 0)) {
-    fieldErrors.targetCents = "Target must be a non-negative integer in cents.";
+  if (targetCents !== null && (!Number.isInteger(targetCents) || targetCents <= 0)) {
+    fieldErrors.targetCents = "Target must be a positive integer in cents.";
   }
 
   if (isGroupFunded && targetCents === null) {

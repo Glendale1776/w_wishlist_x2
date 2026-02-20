@@ -272,9 +272,13 @@ function mergeDraftTextWithImported(input: {
 }
 
 function buildPayload(wishlistId: string, form: ItemFormValues, parsedDraft: ParsedDraftFields) {
-  const targetCents = parseMoneyToCents(form.target);
+  const rawTargetCents = parseMoneyToCents(form.target);
+  const targetCents =
+    rawTargetCents !== null && Number.isInteger(rawTargetCents) && rawTargetCents > 0 ? rawTargetCents : null;
   const fallbackTargetCents =
-    form.isGroupFunded && targetCents === null && parsedDraft.priceCents !== null ? parsedDraft.priceCents : targetCents;
+    form.isGroupFunded && targetCents === null && parsedDraft.priceCents !== null && parsedDraft.priceCents > 0
+      ? parsedDraft.priceCents
+      : targetCents;
 
   return {
     wishlistId,
@@ -464,10 +468,6 @@ export default function WishlistEditorPage() {
       }
     );
   }, [contributionByItemId, shortfallItem]);
-  const shortfallRemainingCents = useMemo(() => {
-    if (!shortfallItem || !shortfallItem.isGroupFunded || shortfallItem.targetCents === null) return null;
-    return Math.max(shortfallItem.targetCents - (shortfallContributionSummary?.fundedCents || 0), 0);
-  }, [shortfallContributionSummary, shortfallItem]);
 
   const duplicateUrlWarning = useMemo(() => {
     const normalized = form.url.trim().toLowerCase();
@@ -1381,9 +1381,12 @@ export default function WishlistEditorPage() {
       parsedDraftResult.parsed,
     );
 
-    if (payload.isGroupFunded && (payload.targetCents === null || Number.isNaN(payload.targetCents))) {
+    if (
+      payload.isGroupFunded &&
+      (payload.targetCents === null || Number.isNaN(payload.targetCents) || payload.targetCents <= 0)
+    ) {
       setIsSubmitting(false);
-      setFieldErrors({ targetCents: "Target must be a valid decimal amount." });
+      setFieldErrors({ targetCents: "Target must be greater than 0." });
       return;
     }
     if (payload.imageUrls.length > CLIENT_MAX_ITEM_IMAGES) {
@@ -1688,8 +1691,11 @@ export default function WishlistEditorPage() {
 
     const payload = buildPayload(wishlistId, { ...form, imageUrls: [] }, parsedDraftResult.parsed);
 
-    if (payload.isGroupFunded && (payload.targetCents === null || Number.isNaN(payload.targetCents))) {
-      setFieldErrors({ targetCents: "Target must be a valid decimal amount." });
+    if (
+      payload.isGroupFunded &&
+      (payload.targetCents === null || Number.isNaN(payload.targetCents) || payload.targetCents <= 0)
+    ) {
+      setFieldErrors({ targetCents: "Target must be greater than 0." });
       return;
     }
 
@@ -2079,8 +2085,6 @@ export default function WishlistEditorPage() {
                 fundedCents: item.fundedCents,
                 contributorCount: item.contributorCount,
               };
-              const fundedDisplay = `$${(contributionSummary.fundedCents / 100).toFixed(2)}`;
-              const contributorLabel = contributionSummary.contributorCount === 1 ? "person" : "people";
               const shortfallCents =
                 item.isGroupFunded && item.targetCents !== null
                   ? Math.max(item.targetCents - contributionSummary.fundedCents, 0)
@@ -2160,14 +2164,12 @@ export default function WishlistEditorPage() {
                           <p className="mt-1 text-xs text-zinc-600">
                             Group-funded target: {item.targetCents !== null ? `$${(item.targetCents / 100).toFixed(2)}` : "Unset"}
                           </p>
-                          <p className="mt-1 text-xs text-zinc-700">
-                            Contributed: {fundedDisplay} by {contributionSummary.contributorCount} {contributorLabel}
-                          </p>
+                          {contributionSummary.contributorCount > 0 ? (
+                            <p className="mt-1 text-xs text-zinc-700">Someone has contributed.</p>
+                          ) : null}
                           {isUnderTarget ? (
                             <div className="mt-2 flex flex-wrap items-center gap-2">
-                              <p className="text-xs font-medium text-amber-700">
-                                Remaining: ${(shortfallCents / 100).toFixed(2)}
-                              </p>
+                              <p className="text-xs font-medium text-amber-700">Target not reached yet.</p>
                               <button
                                 className="rounded-md border border-amber-300 bg-amber-50 px-2.5 py-1 text-xs font-medium text-amber-800"
                                 onClick={() => setShortfallItemId(item.id)}
@@ -2339,11 +2341,11 @@ export default function WishlistEditorPage() {
                       Group-funded target:{" "}
                       {reviewingItem.targetCents !== null ? `$${(reviewingItem.targetCents / 100).toFixed(2)}` : "Unset"}
                     </p>
-                    <p>
-                      Contributed: ${((reviewingContributionSummary?.fundedCents || 0) / 100).toFixed(2)} by{" "}
-                      {reviewingContributionSummary?.contributorCount || 0}{" "}
-                      {(reviewingContributionSummary?.contributorCount || 0) === 1 ? "person" : "people"}
-                    </p>
+                    {(reviewingContributionSummary?.contributorCount || 0) > 0 ? (
+                      <p>Someone has contributed.</p>
+                    ) : (
+                      <p>No contributions yet.</p>
+                    )}
                   </div>
                 ) : null}
               </div>
@@ -2369,8 +2371,11 @@ export default function WishlistEditorPage() {
               <p>
                 Target: {shortfallItem.targetCents !== null ? `$${(shortfallItem.targetCents / 100).toFixed(2)}` : "Unset"}
               </p>
-              <p>Contributed: ${((shortfallContributionSummary?.fundedCents || 0) / 100).toFixed(2)}</p>
-              {shortfallRemainingCents !== null ? <p>Remaining: ${(shortfallRemainingCents / 100).toFixed(2)}</p> : null}
+              {(shortfallContributionSummary?.contributorCount || 0) > 0 ? (
+                <p>Someone has contributed.</p>
+              ) : (
+                <p>No contributions yet.</p>
+              )}
               {shortfallItem.fundingDeadlineAt ? (
                 <p>Current deadline: {new Date(shortfallItem.fundingDeadlineAt).toLocaleDateString()}</p>
               ) : (

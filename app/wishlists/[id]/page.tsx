@@ -1619,7 +1619,7 @@ export default function WishlistEditorPage() {
       {reservationLiveNotice ? <p className="mt-2 text-sm font-medium text-emerald-700">{reservationLiveNotice}</p> : null}
 
       <section className="mt-6 grid items-start gap-6 lg:grid-cols-[1fr_1.2fr]">
-        <aside className="self-start rounded-2xl bg-white/50 p-4 sm:p-5">
+        <aside className="self-start rounded-2xl bg-white/50 p-4 sm:p-5 lg:mt-10">
           <div className="flex items-center justify-between">
             <h2 className="text-lg font-semibold">{editingItemId ? "Edit item" : "Add item"}</h2>
             {editingItemId ? (
@@ -1632,14 +1632,17 @@ export default function WishlistEditorPage() {
           <form className="mt-4 space-y-4" onSubmit={onSubmit} noValidate>
             <section className="rounded-xl border border-sky-100 bg-sky-50/40 p-3 sm:p-4">
               <p className="text-xs font-semibold uppercase tracking-[0.18em] text-sky-700">Title, Description & Price</p>
-              <p className="mt-1 text-xs leading-5 text-zinc-600">
-                Write item name, price, and key requirements in any order. AI structures it on save. Then optionally
-                paste a product URL and import more details. Your notes stay first.
-              </p>
+              <ul className="mt-2 list-disc space-y-1 pl-5 text-xs leading-5 text-zinc-600">
+                <li>Include item name and short context.</li>
+                <li>Add price in USD (for example: <code>129.99</code> or <code>$129.99</code>).</li>
+                <li>Add must-have specs first: color, size, model, version.</li>
+                <li>Optional: add extra notes like accessories or preferred store.</li>
+                <li>Optional: paste product URL below to import details. Your notes stay first.</li>
+              </ul>
 
               <div className="mt-3">
-                <label className="mb-1 block text-sm font-medium text-zinc-800" htmlFor="item-description">
-                  Title, Description & Price
+                <label className="sr-only" htmlFor="item-description">
+                  Item details
                 </label>
                 <textarea
                   className={`min-h-28 w-full rounded-md px-3 py-2 text-sm outline-none ${

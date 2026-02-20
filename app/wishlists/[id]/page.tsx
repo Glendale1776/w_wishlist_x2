@@ -8,17 +8,18 @@ import { getAuthenticatedEmail, getAuthenticatedOwnerHeaders, persistReturnTo } 
 import type { ItemRecord } from "@/app/_lib/item-store";
 
 type ItemFormValues = {
-  title: string;
   description: string;
   url: string;
-  price: string;
   imageUrls: string[];
   isGroupFunded: boolean;
   target: string;
 };
 
 type ItemFieldErrors = Partial<
-  Record<"title" | "description" | "url" | "priceCents" | "imageUrl" | "imageUrls" | "targetCents" | "imageFile", string>
+  Record<
+    "title" | "description" | "url" | "priceCents" | "imageUrl" | "imageUrls" | "targetCents" | "imageFile" | "draftText",
+    string
+  >
 >;
 
 type ItemApiResponse =
@@ -83,6 +84,46 @@ type ImagePreviewResponse =
       };
     };
 
+type DraftParseResponse =
+  | {
+      ok: true;
+      parsed: {
+        title: string | null;
+        description: string | null;
+        priceCents: number | null;
+      };
+      priceNeedsReview: boolean;
+      priceReviewMessage: string | null;
+    }
+  | {
+      ok: false;
+      error: {
+        code: string;
+        message: string;
+        fieldErrors?: Record<string, string>;
+      };
+    };
+
+type MetadataApiResponse =
+  | {
+      ok: true;
+      metadata: {
+        title: string | null;
+        description: string | null;
+        imageUrl: string | null;
+        imageUrls?: string[] | null;
+        priceCents: number | null;
+        priceNeedsReview?: boolean;
+        priceReviewMessage?: string | null;
+      };
+    }
+  | {
+      ok: false;
+      error: {
+        message: string;
+      };
+    };
+
 type WishlistsListResponse =
   | {
       ok: true;
@@ -131,10 +172,8 @@ type PendingImage = {
 };
 
 const EMPTY_FORM: ItemFormValues = {
-  title: "",
   description: "",
   url: "",
-  price: "",
   imageUrls: [],
   isGroupFunded: false,
   target: "",
@@ -158,65 +197,68 @@ function parseMoneyToCents(value: string): number | null {
   return Math.round(asNumber * 100);
 }
 
-function normalizeDescriptionLine(value: string) {
-  return value
-    .replace(/^\s*(?:[-*•●▪◦]|\d+[.)])\s*/, "")
-    .replace(/\s+/g, " ")
-    .trim()
-    .toLowerCase();
+type ParsedDraftFields = {
+  title: string;
+  description: string | null;
+  priceCents: number | null;
+};
+
+function formatPriceCents(cents: number | null) {
+  if (cents === null) return null;
+  return `$${(cents / 100).toFixed(2)}`;
 }
 
-function splitDescriptionLines(value: string): string[] {
-  const normalized = value.replace(/\r/g, "\n").trim();
-  if (!normalized) return [];
-  return normalized
-    .split(/\n+/)
-    .map((line) => line.trim())
-    .filter(Boolean);
-}
-
-function mergeDescriptionWithPriority(userNotes: string, importedDescription: string | null | undefined) {
-  const preferredNotes = userNotes.trim();
-  const imported = (importedDescription || "").trim();
-
-  if (!preferredNotes) return imported;
-  if (!imported) return preferredNotes;
-
-  const merged: string[] = [];
-  const seen = new Set<string>();
-
-  const pushLine = (line: string) => {
-    const trimmed = line.trim();
-    if (!trimmed) return;
-    const dedupeKey = normalizeDescriptionLine(trimmed);
-    if (!dedupeKey || seen.has(dedupeKey)) return;
-    seen.add(dedupeKey);
-    merged.push(trimmed);
-  };
-
-  for (const line of splitDescriptionLines(preferredNotes)) {
-    pushLine(line);
+function buildDraftEditorTextFromStructured(input: {
+  title: string | null;
+  description: string | null;
+  priceCents: number | null;
+}) {
+  const lines: string[] = [];
+  if (input.title && input.title.trim()) {
+    lines.push(`Title: ${input.title.trim()}`);
   }
-  for (const line of splitDescriptionLines(imported)) {
-    pushLine(line);
+  if (input.priceCents !== null) {
+    lines.push(`Price: ${formatPriceCents(input.priceCents)}`);
   }
-
-  return merged.join("\n");
+  if (input.description && input.description.trim()) {
+    lines.push("Description:");
+    lines.push(input.description.trim());
+  }
+  return lines.join("\n");
 }
 
-function buildPayload(wishlistId: string, form: ItemFormValues) {
-  const priceCents = parseMoneyToCents(form.price);
+function mergeDraftTextWithImported(input: {
+  currentDraftText: string;
+  importedTitle: string | null;
+  importedDescription: string | null;
+  importedPriceCents: number | null;
+}) {
+  const current = input.currentDraftText.trim();
+  const imported = buildDraftEditorTextFromStructured({
+    title: input.importedTitle,
+    description: input.importedDescription,
+    priceCents: input.importedPriceCents,
+  });
+
+  if (!current) return imported;
+  if (!imported) return current;
+  return `${current}\n\nImported from URL:\n${imported}`;
+}
+
+function buildPayload(wishlistId: string, form: ItemFormValues, parsedDraft: ParsedDraftFields) {
   const targetCents = parseMoneyToCents(form.target);
+  const fallbackTargetCents =
+    form.isGroupFunded && targetCents === null && parsedDraft.priceCents !== null ? parsedDraft.priceCents : targetCents;
 
   return {
     wishlistId,
-    title: form.title.trim(),
-    description: form.description.trim() || null,
+    title: parsedDraft.title.trim(),
+    description: parsedDraft.description,
     url: form.url.trim() || null,
-    priceCents,
+    priceCents: parsedDraft.priceCents,
     imageUrls: form.imageUrls,
     isGroupFunded: form.isGroupFunded,
-    targetCents,
+    targetCents: form.isGroupFunded ? fallbackTargetCents : null,
   };
 }
 
@@ -328,6 +370,7 @@ export default function WishlistEditorPage() {
   const [shareUrlPreview, setShareUrlPreview] = useState<string | null>(null);
   const [shareLinkMessage, setShareLinkMessage] = useState<string | null>(null);
   const [shareLinkError, setShareLinkError] = useState<string | null>(null);
+  const [isCopyLinkConfirmed, setIsCopyLinkConfirmed] = useState(false);
   const [availabilityByItemId, setAvailabilityByItemId] = useState<Record<string, ItemAvailability>>({});
   const [contributionByItemId, setContributionByItemId] = useState<Record<string, ItemContributionSummary>>({});
   const [reservationLiveNotice, setReservationLiveNotice] = useState<string | null>(null);
@@ -340,7 +383,6 @@ export default function WishlistEditorPage() {
   const [metadataMessage, setMetadataMessage] = useState<string | null>(null);
   const [priceReviewNotice, setPriceReviewNotice] = useState<string | null>(null);
   const [isSubmitting, setIsSubmitting] = useState(false);
-  const [isFetchingMetadata, setIsFetchingMetadata] = useState(false);
   const [isRestoringItemId, setIsRestoringItemId] = useState<string | null>(null);
 
   const [pendingImages, setPendingImages] = useState<PendingImage[]>([]);
@@ -359,6 +401,7 @@ export default function WishlistEditorPage() {
   const reviewLoadTokenRef = useRef<string | null>(null);
   const availabilityByItemIdRef = useRef<Record<string, ItemAvailability>>({});
   const reservationNoticeTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const copyLinkFeedbackTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const activeItems = useMemo(() => items.filter((item) => !item.archivedAt), [items]);
   const archivedItems = useMemo(() => items.filter((item) => Boolean(item.archivedAt)), [items]);
@@ -586,6 +629,9 @@ export default function WishlistEditorPage() {
     return () => {
       if (reservationNoticeTimerRef.current) {
         clearTimeout(reservationNoticeTimerRef.current);
+      }
+      if (copyLinkFeedbackTimerRef.current) {
+        clearTimeout(copyLinkFeedbackTimerRef.current);
       }
     };
   }, []);
@@ -857,12 +903,16 @@ export default function WishlistEditorPage() {
   }
 
   function startEdit(item: ItemRecord) {
+    const draftText = buildDraftEditorTextFromStructured({
+      title: item.title,
+      description: item.description || null,
+      priceCents: item.priceCents,
+    });
+
     setEditingItemId(item.id);
     setForm({
-      title: item.title,
-      description: item.description || "",
+      description: draftText || item.description || "",
       url: item.url || "",
-      price: centsToDisplay(item.priceCents),
       imageUrls: getItemImageUrls(item),
       isGroupFunded: item.isGroupFunded,
       target: centsToDisplay(item.targetCents),
@@ -885,7 +935,20 @@ export default function WishlistEditorPage() {
   }
 
   function applyServerFieldErrors(errors?: ItemFieldErrors) {
-    setFieldErrors(errors || {});
+    if (!errors) {
+      setFieldErrors({});
+      return;
+    }
+
+    const nextErrors: ItemFieldErrors = { ...errors };
+    if (errors.title && !nextErrors.description) {
+      nextErrors.description = errors.title;
+    }
+    if (errors.priceCents && !nextErrors.description) {
+      nextErrors.description = errors.priceCents;
+    }
+
+    setFieldErrors(nextErrors);
   }
 
   function onToggleGroupFunded(checked: boolean) {
@@ -897,9 +960,121 @@ export default function WishlistEditorPage() {
       return {
         ...prev,
         isGroupFunded: true,
-        target: prev.target || prev.price,
+        target: prev.target,
       };
     });
+  }
+
+  async function parseDraftTextWithAi(ownerEmail: string, draftText: string): Promise<{
+    parsed: ParsedDraftFields;
+    priceNeedsReview: boolean;
+    priceReviewMessage: string | null;
+  } | null> {
+    let response: Response;
+    try {
+      response = await fetch("/api/items/draft-parse", {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          "x-owner-email": ownerEmail,
+        },
+        body: JSON.stringify({
+          draftText,
+        }),
+      });
+    } catch {
+      setFormError("Unable to parse item text right now. Please retry.");
+      return null;
+    }
+
+    const payload = (await response.json()) as DraftParseResponse;
+    if (!response.ok || !payload.ok) {
+      const message = payload && !payload.ok ? payload.error.message : "Unable to parse item text.";
+      setFormError(message);
+      if (payload && !payload.ok && payload.error.fieldErrors?.draftText) {
+        setFieldErrors((current) => ({ ...current, description: payload.error.fieldErrors?.draftText || undefined }));
+      }
+      return null;
+    }
+
+    const title = (payload.parsed.title || "").trim();
+    if (!title) {
+      setFieldErrors((current) => ({
+        ...current,
+        description: "Could not detect item title. Add a product name in the text.",
+      }));
+      return null;
+    }
+
+    return {
+      parsed: {
+        title,
+        description: payload.parsed.description?.trim() || null,
+        priceCents: payload.parsed.priceCents,
+      },
+      priceNeedsReview: payload.priceNeedsReview,
+      priceReviewMessage: payload.priceReviewMessage,
+    };
+  }
+
+  async function fetchMetadataForUrl(input: {
+    ownerEmail: string;
+    url: string;
+    specNotes: string;
+  }): Promise<{
+    ok: true;
+    metadata: Extract<MetadataApiResponse, { ok: true }>["metadata"];
+    reviewNotice: string | null;
+    importedImageCount: number;
+  } | { ok: false; message: string }> {
+    let response: Response;
+    try {
+      response = await fetch("/api/items/metadata", {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          "x-owner-email": input.ownerEmail,
+        },
+        body: JSON.stringify({
+          url: input.url,
+          specNotes: input.specNotes || null,
+        }),
+      });
+    } catch {
+      return {
+        ok: false,
+        message: "Unable to fetch metadata right now. Saved using your typed details only.",
+      };
+    }
+
+    const payload = (await response.json()) as MetadataApiResponse;
+    if (!response.ok || !payload.ok) {
+      const message = payload && !payload.ok ? payload.error.message : "Metadata fetch failed.";
+      return {
+        ok: false,
+        message: `${message} Saved using your typed details only.`,
+      };
+    }
+
+    const needsPriceReview = Boolean(payload.metadata.priceNeedsReview) || payload.metadata.priceCents === null;
+    const reviewMessage =
+      payload.metadata.priceReviewMessage?.trim() ||
+      (payload.metadata.priceCents === null
+        ? "Price was not detected. Please verify before saving."
+        : "Imported price may be inaccurate. Please verify before saving.");
+
+    const importedImageCount = Array.isArray(payload.metadata.imageUrls)
+      ? payload.metadata.imageUrls.filter((value) => (value || "").trim().length > 0).length
+      : payload.metadata.imageUrl
+        ? 1
+        : 0;
+
+    return {
+      ok: true,
+      metadata: payload.metadata,
+      reviewNotice: needsPriceReview ? reviewMessage : null,
+      importedImageCount,
+    };
   }
 
   function onSelectImageFiles(event: React.ChangeEvent<HTMLInputElement>) {
@@ -1051,7 +1226,7 @@ export default function WishlistEditorPage() {
     setFormSuccess(null);
     setMetadataMessage(null);
     setPriceReviewNotice(null);
-    setFieldErrors((current) => ({ ...current, imageFile: undefined }));
+    setFieldErrors((current) => ({ ...current, imageFile: undefined, description: undefined }));
 
     const ownerEmail = await getAuthenticatedEmail();
     if (!ownerEmail) {
@@ -1060,28 +1235,89 @@ export default function WishlistEditorPage() {
       return;
     }
 
-    const payload = buildPayload(wishlistId, form);
-
-    if (!payload.title) {
-      setFieldErrors({ title: "Item title is required." });
-      return;
-    }
-
-    if (Number.isNaN(payload.priceCents)) {
-      setFieldErrors({ priceCents: "Price must be a valid decimal amount." });
-      return;
-    }
-
-    if (payload.isGroupFunded && Number.isNaN(payload.targetCents)) {
-      setFieldErrors({ targetCents: "Target must be a valid decimal amount." });
-      return;
-    }
-    if (payload.imageUrls.length > CLIENT_MAX_ITEM_IMAGES) {
-      setFieldErrors({ imageFile: `Up to ${CLIENT_MAX_ITEM_IMAGES} images are allowed per item.` });
+    const draftText = form.description.trim();
+    if (!draftText) {
+      setFieldErrors({ description: "Enter title, description, and price details in this field." });
       return;
     }
 
     setIsSubmitting(true);
+
+    let draftTextForParsing = draftText;
+    let submissionImageUrls = [...form.imageUrls];
+    let submissionTarget = form.target;
+    let metadataReviewNotice: string | null = null;
+
+    const normalizedUrl = form.url.trim();
+    if (normalizedUrl) {
+      setMetadataMessage("Importing details from URL before save...");
+      const metadataResult = await fetchMetadataForUrl({
+        ownerEmail,
+        url: normalizedUrl,
+        specNotes: draftTextForParsing,
+      });
+
+      if (metadataResult.ok) {
+        const metadataImageUrls = Array.isArray(metadataResult.metadata.imageUrls)
+          ? metadataResult.metadata.imageUrls.map((url) => (url || "").trim()).filter(Boolean)
+          : [];
+        const fallbackSingleImage = metadataResult.metadata.imageUrl?.trim() || "";
+        if (metadataImageUrls.length === 0 && fallbackSingleImage) {
+          metadataImageUrls.push(fallbackSingleImage);
+        }
+
+        if (metadataImageUrls.length > 0) {
+          submissionImageUrls = Array.from(new Set([...submissionImageUrls, ...metadataImageUrls])).slice(
+            0,
+            CLIENT_MAX_ITEM_IMAGES,
+          );
+        }
+
+        draftTextForParsing = mergeDraftTextWithImported({
+          currentDraftText: draftTextForParsing,
+          importedTitle: metadataResult.metadata.title,
+          importedDescription: metadataResult.metadata.description,
+          importedPriceCents: metadataResult.metadata.priceCents,
+        });
+        metadataReviewNotice = metadataResult.reviewNotice;
+        setMetadataMessage(
+          `URL details applied before save. Imported ${Math.min(metadataResult.importedImageCount, CLIENT_MAX_ITEM_IMAGES)} image(s).`,
+        );
+
+        if (form.isGroupFunded && !submissionTarget && metadataResult.metadata.priceCents !== null) {
+          submissionTarget = centsToDisplay(metadataResult.metadata.priceCents);
+        }
+      } else {
+        setMetadataMessage(metadataResult.message);
+      }
+    }
+
+    const parsedDraftResult = await parseDraftTextWithAi(ownerEmail, draftTextForParsing);
+    if (!parsedDraftResult) {
+      setIsSubmitting(false);
+      return;
+    }
+
+    const payload = buildPayload(
+      wishlistId,
+      {
+        ...form,
+        imageUrls: submissionImageUrls,
+        target: submissionTarget,
+      },
+      parsedDraftResult.parsed,
+    );
+
+    if (payload.isGroupFunded && (payload.targetCents === null || Number.isNaN(payload.targetCents))) {
+      setIsSubmitting(false);
+      setFieldErrors({ targetCents: "Target must be a valid decimal amount." });
+      return;
+    }
+    if (payload.imageUrls.length > CLIENT_MAX_ITEM_IMAGES) {
+      setIsSubmitting(false);
+      setFieldErrors({ imageFile: `Up to ${CLIENT_MAX_ITEM_IMAGES} images are allowed per item.` });
+      return;
+    }
 
     const endpoint = editingItemId ? `/api/items/${editingItemId}` : "/api/items";
     const method = editingItemId ? "PATCH" : "POST";
@@ -1126,6 +1362,12 @@ export default function WishlistEditorPage() {
     } else {
       setFormSuccess(editingItemId ? "Item updated." : "Item created.");
     }
+    setPriceReviewNotice(
+      metadataReviewNotice ||
+        (parsedDraftResult.priceNeedsReview
+          ? parsedDraftResult.priceReviewMessage || "Imported price may be missing or inaccurate. Please verify."
+          : null),
+    );
 
     const currentImageUrls = getItemImageUrls(result.item);
     const primaryImageRef = currentImageUrls[0] || null;
@@ -1233,125 +1475,25 @@ export default function WishlistEditorPage() {
   }
 
   async function copyShareLink(value: string) {
+    if (copyLinkFeedbackTimerRef.current) {
+      clearTimeout(copyLinkFeedbackTimerRef.current);
+      copyLinkFeedbackTimerRef.current = null;
+    }
+
     try {
       await navigator.clipboard.writeText(value);
       setShareLinkMessage("Wishlist link copied.");
       setShareLinkError(null);
+      setIsCopyLinkConfirmed(true);
+      copyLinkFeedbackTimerRef.current = setTimeout(() => {
+        setIsCopyLinkConfirmed(false);
+        copyLinkFeedbackTimerRef.current = null;
+      }, 1200);
     } catch {
       setShareLinkMessage(null);
       setShareLinkError("Clipboard unavailable. Copy the link manually.");
+      setIsCopyLinkConfirmed(false);
     }
-  }
-
-  async function onAutofillFromUrl() {
-    setMetadataMessage(null);
-    setPriceReviewNotice(null);
-
-    const ownerEmail = await getAuthenticatedEmail();
-    if (!ownerEmail) {
-      persistReturnTo(`/wishlists/${wishlistId}`);
-      router.replace(`/login?returnTo=${encodeURIComponent(`/wishlists/${wishlistId}`)}`);
-      return;
-    }
-
-    if (!form.url.trim()) {
-      setMetadataMessage("Enter a URL before autofill.");
-      return;
-    }
-
-    setIsFetchingMetadata(true);
-
-    let response: Response;
-    try {
-      response = await fetch("/api/items/metadata", {
-        method: "POST",
-        headers: {
-          "content-type": "application/json",
-          "x-owner-email": ownerEmail,
-        },
-        body: JSON.stringify({
-          url: form.url.trim(),
-          specNotes: form.description.trim() || null,
-        }),
-      });
-    } catch {
-      setIsFetchingMetadata(false);
-      setMetadataMessage("Unable to fetch metadata right now. Continue with manual entry.");
-      return;
-    }
-
-    const payload = (await response.json()) as
-      | {
-          ok: true;
-          metadata: {
-            title: string | null;
-            description: string | null;
-            imageUrl: string | null;
-            imageUrls?: string[] | null;
-            priceCents: number | null;
-            priceNeedsReview?: boolean;
-            priceReviewMessage?: string | null;
-          };
-        }
-      | {
-          ok: false;
-          error: {
-            message: string;
-          };
-        };
-
-    setIsFetchingMetadata(false);
-
-    if (!response.ok || !payload.ok) {
-      const message = payload && !payload.ok ? payload.error.message : "Metadata fetch failed.";
-      setMetadataMessage(`${message} Continue with manual entry.`);
-      return;
-    }
-
-    setForm((prev) => {
-      const priceFromMeta = payload.metadata.priceCents !== null ? centsToDisplay(payload.metadata.priceCents) : prev.price;
-      const nextTarget = prev.isGroupFunded ? prev.target || priceFromMeta : prev.target;
-      const metadataImageUrls = Array.isArray(payload.metadata.imageUrls)
-        ? payload.metadata.imageUrls.map((url) => (url || "").trim()).filter(Boolean)
-        : [];
-      const fallbackSingleImage = payload.metadata.imageUrl?.trim() || "";
-      if (metadataImageUrls.length === 0 && fallbackSingleImage) {
-        metadataImageUrls.push(fallbackSingleImage);
-      }
-      const nextImageUrls =
-        metadataImageUrls.length > 0
-          ? Array.from(new Set(metadataImageUrls)).slice(0, CLIENT_MAX_ITEM_IMAGES)
-          : prev.imageUrls;
-
-      return {
-        ...prev,
-        title: payload.metadata.title || prev.title,
-        description: mergeDescriptionWithPriority(prev.description, payload.metadata.description),
-        imageUrls: nextImageUrls,
-        price: priceFromMeta,
-        target: nextTarget,
-      };
-    });
-
-    const needsPriceReview = Boolean(payload.metadata.priceNeedsReview) || payload.metadata.priceCents === null;
-    const reviewMessage =
-      payload.metadata.priceReviewMessage?.trim() ||
-      (payload.metadata.priceCents === null
-        ? "Price was not detected. Please enter and verify it before saving."
-        : "Imported price may be inaccurate. Please verify it before saving.");
-
-    setPriceReviewNotice(needsPriceReview ? reviewMessage : null);
-    const importedImageCount = Array.isArray(payload.metadata.imageUrls)
-      ? payload.metadata.imageUrls.filter((value) => (value || "").trim().length > 0).length
-      : payload.metadata.imageUrl
-        ? 1
-        : 0;
-
-    setMetadataMessage(
-      needsPriceReview
-        ? `AI autofill complete. Imported ${Math.min(importedImageCount, CLIENT_MAX_ITEM_IMAGES)} image(s). Your notes stayed first. Please check the price before saving.`
-        : `AI autofill complete. Imported ${Math.min(importedImageCount, CLIENT_MAX_ITEM_IMAGES)} image(s). Your notes stayed first. Review fields before saving.`,
-    );
   }
 
   async function onRemoveImages() {
@@ -1373,19 +1515,18 @@ export default function WishlistEditorPage() {
       return;
     }
 
-    const payload = buildPayload(wishlistId, { ...form, imageUrls: [] });
-
-    if (!payload.title) {
-      setFieldErrors({ title: "Item title is required." });
+    const draftText = form.description.trim();
+    if (!draftText) {
+      setFieldErrors({ description: "Enter title, description, and price details in this field." });
       return;
     }
 
-    if (Number.isNaN(payload.priceCents)) {
-      setFieldErrors({ priceCents: "Price must be a valid decimal amount." });
-      return;
-    }
+    const parsedDraftResult = await parseDraftTextWithAi(ownerEmail, draftText);
+    if (!parsedDraftResult) return;
 
-    if (payload.isGroupFunded && Number.isNaN(payload.targetCents)) {
+    const payload = buildPayload(wishlistId, { ...form, imageUrls: [] }, parsedDraftResult.parsed);
+
+    if (payload.isGroupFunded && (payload.targetCents === null || Number.isNaN(payload.targetCents))) {
       setFieldErrors({ targetCents: "Target must be a valid decimal amount." });
       return;
     }
@@ -1442,7 +1583,11 @@ export default function WishlistEditorPage() {
         </div>
         <div className="flex flex-wrap items-center justify-end gap-2">
           <button
-            className="rounded-full bg-gradient-to-r from-sky-500 to-blue-600 px-5 py-2.5 text-sm font-semibold text-white shadow-sm disabled:cursor-not-allowed disabled:opacity-60"
+            className={`group relative overflow-hidden rounded-full bg-gradient-to-r px-5 py-2.5 text-sm font-semibold text-white shadow-sm transition-all duration-200 hover:-translate-y-1 hover:shadow-xl hover:brightness-110 active:translate-y-0 active:scale-[0.98] disabled:cursor-not-allowed disabled:opacity-60 ${
+              isCopyLinkConfirmed
+                ? "from-emerald-500 to-teal-500 ring-2 ring-emerald-200 animate-[pulse_900ms_ease-out_1]"
+                : "from-sky-500 to-blue-600"
+            }`}
             disabled={!shareUrlPreview}
             onClick={() => {
               if (!shareUrlPreview) return;
@@ -1450,9 +1595,21 @@ export default function WishlistEditorPage() {
             }}
             type="button"
           >
-            {shareUrlPreview ? "Copy wishlist link" : "Wishlist link unavailable"}
+            <span
+              aria-hidden="true"
+              className={`pointer-events-none absolute inset-0 rounded-full transition-opacity duration-300 ${
+                isCopyLinkConfirmed ? "bg-white/20 opacity-100" : "bg-white/10 opacity-0 group-hover:opacity-100"
+              }`}
+            />
+            <span className="relative z-[1] flex items-center justify-center gap-1.5">
+              {isCopyLinkConfirmed ? <span aria-hidden="true">✓</span> : null}
+              {shareUrlPreview ? (isCopyLinkConfirmed ? "Copied!" : "Copy wishlist link") : "Wishlist link unavailable"}
+            </span>
           </button>
-          <Link className="rounded-full border border-zinc-300 px-4 py-2 text-sm font-medium text-zinc-800" href="/wishlists">
+          <Link
+            className="rounded-full border border-zinc-300 bg-white/70 px-4 py-2 text-sm font-medium text-zinc-800 transition-all duration-200 hover:-translate-y-1 hover:scale-[1.02] hover:border-sky-300 hover:bg-white hover:shadow-lg active:translate-y-0 active:scale-[0.98]"
+            href="/wishlists"
+          >
             Back to My wishlists
           </Link>
         </div>
@@ -1462,7 +1619,7 @@ export default function WishlistEditorPage() {
       {reservationLiveNotice ? <p className="mt-2 text-sm font-medium text-emerald-700">{reservationLiveNotice}</p> : null}
 
       <section className="mt-6 grid items-start gap-6 lg:grid-cols-[1fr_1.2fr]">
-        <aside className="self-start p-1">
+        <aside className="self-start rounded-2xl bg-white/50 p-4 sm:p-5">
           <div className="flex items-center justify-between">
             <h2 className="text-lg font-semibold">{editingItemId ? "Edit item" : "Add item"}</h2>
             {editingItemId ? (
@@ -1473,38 +1630,33 @@ export default function WishlistEditorPage() {
           </div>
 
           <form className="mt-4 space-y-4" onSubmit={onSubmit} noValidate>
-            <div>
-              <label className="mb-1 block text-sm font-medium text-zinc-800" htmlFor="item-title">
-                Item title
-              </label>
-              <input
-                className="w-full rounded-md border border-zinc-300 px-3 py-2 text-sm outline-none focus:border-zinc-500"
-                id="item-title"
-                onChange={(event) => setForm((prev) => ({ ...prev, title: event.target.value }))}
-                value={form.title}
-              />
-              {fieldErrors.title ? <p className="mt-1 text-xs text-rose-700">{fieldErrors.title}</p> : null}
-            </div>
-
             <section className="rounded-xl border border-sky-100 bg-sky-50/40 p-3 sm:p-4">
-              <p className="text-xs font-semibold uppercase tracking-[0.18em] text-sky-700">Description + URL import</p>
+              <p className="text-xs font-semibold uppercase tracking-[0.18em] text-sky-700">Title, Description & Price</p>
               <p className="mt-1 text-xs leading-5 text-zinc-600">
-                Add must-have specs in <strong>Item description</strong> first (color, size, model). Then paste a product
-                link and import. Your notes stay first, imported details are added after.
+                Write item name, price, and key requirements in any order. AI structures it on save. Then optionally
+                paste a product URL and import more details. Your notes stay first.
               </p>
 
               <div className="mt-3">
                 <label className="mb-1 block text-sm font-medium text-zinc-800" htmlFor="item-description">
-                  Item description
+                  Title, Description & Price
                 </label>
                 <textarea
-                  className="min-h-24 w-full rounded-md border border-zinc-300 px-3 py-2 text-sm outline-none focus:border-zinc-500"
+                  className={`min-h-28 w-full rounded-md px-3 py-2 text-sm outline-none ${
+                    priceReviewNotice
+                      ? "border border-amber-400 bg-amber-50 focus:border-amber-500"
+                      : "border border-zinc-300 focus:border-zinc-500"
+                  }`}
                   id="item-description"
-                  onChange={(event) => setForm((prev) => ({ ...prev, description: event.target.value }))}
-                  placeholder="Example: Orange color, 256 GB, unlocked version."
+                  onChange={(event) => {
+                    setPriceReviewNotice(null);
+                    setForm((prev) => ({ ...prev, description: event.target.value }));
+                  }}
+                  placeholder={`Example:\nPrice: 129.99\niPhone 17 Pro Max Orange, 256 GB, unlocked`}
                   value={form.description}
                 />
                 {fieldErrors.description ? <p className="mt-1 text-xs text-rose-700">{fieldErrors.description}</p> : null}
+                {priceReviewNotice ? <p className="mt-1 text-xs text-amber-700">{priceReviewNotice}</p> : null}
               </div>
 
               <div className="mt-3">
@@ -1517,14 +1669,9 @@ export default function WishlistEditorPage() {
                   onChange={(event) => setForm((prev) => ({ ...prev, url: event.target.value }))}
                   value={form.url}
                 />
-                <button
-                  className="btn-notch btn-notch--ink mt-2 w-full"
-                  disabled={isFetchingMetadata}
-                  onClick={onAutofillFromUrl}
-                  type="button"
-                >
-                  {isFetchingMetadata ? "Importing from URL..." : "One-click import from URL"}
-                </button>
+                <p className="mt-2 text-xs text-zinc-600">
+                  Add item will auto-import details from this URL before saving.
+                </p>
                 {fieldErrors.url ? <p className="mt-1 text-xs text-rose-700">{fieldErrors.url}</p> : null}
                 {duplicateUrlWarning ? (
                   <p className="mt-1 text-xs text-amber-700">
@@ -1534,45 +1681,16 @@ export default function WishlistEditorPage() {
               </div>
             </section>
 
-            <div className="grid gap-3 sm:grid-cols-2">
-              <div>
-                <label className="mb-1 block text-sm font-medium text-zinc-800" htmlFor="item-price">
-                  Price (USD)
-                </label>
-                <input
-                  className={`w-full rounded-md px-3 py-2 text-sm outline-none ${
-                    priceReviewNotice
-                      ? "border border-amber-400 bg-amber-50 focus:border-amber-500"
-                      : "border border-zinc-300 focus:border-zinc-500"
-                  }`}
-                  id="item-price"
-                  onChange={(event) =>
-                    {
-                      setPriceReviewNotice(null);
-                      setForm((prev) => {
-                        const nextPrice = event.target.value;
-                        const nextTarget = prev.isGroupFunded && !prev.target ? nextPrice : prev.target;
-                        return { ...prev, price: nextPrice, target: nextTarget };
-                      });
-                    }
-                  }
-                  placeholder="129.99"
-                  value={form.price}
-                />
-                {fieldErrors.priceCents ? <p className="mt-1 text-xs text-rose-700">{fieldErrors.priceCents}</p> : null}
-                {priceReviewNotice ? <p className="mt-1 text-xs text-amber-700">{priceReviewNotice}</p> : null}
+            <label className="flex items-center gap-2 text-sm text-zinc-800">
+              <input
+                checked={form.isGroupFunded}
+                onChange={(event) => onToggleGroupFunded(event.target.checked)}
+                type="checkbox"
+              />
+              <span>Group funded item</span>
+            </label>
 
-                <label className="mt-3 flex items-center gap-2 text-sm text-zinc-800">
-                  <input
-                    checked={form.isGroupFunded}
-                    onChange={(event) => onToggleGroupFunded(event.target.checked)}
-                    type="checkbox"
-                  />
-                  <span>Group funded item</span>
-                </label>
-              </div>
-
-              <div className="rounded-md border border-zinc-200 bg-zinc-50 p-3">
+            <div className="rounded-md border border-zinc-200 bg-zinc-50 p-3">
                 <p className="text-sm font-medium text-zinc-800">Item images</p>
                 <div className="mt-2 overflow-hidden rounded-md border border-zinc-200 bg-white">
                   {activeEditPreviewUrl ? (
@@ -1708,7 +1826,6 @@ export default function WishlistEditorPage() {
 
                 {fieldErrors.imageFile ? <p className="mt-2 text-xs text-rose-700">{fieldErrors.imageFile}</p> : null}
                 {imageMessage ? <p className="mt-2 text-xs text-zinc-700">{imageMessage}</p> : null}
-              </div>
             </div>
 
             {form.isGroupFunded ? (

@@ -30,6 +30,7 @@ export function GlobalHeader() {
   const isAuthenticated = Boolean(email);
   const isWishlistsActive = pathname.startsWith("/wishlists");
   const isActivityActive = pathname.startsWith("/me/activity");
+  const shortAccountName = email ? email.split("@")[0] || email : "";
 
   async function handleSignOut() {
     await signOut();
@@ -40,7 +41,7 @@ export function GlobalHeader() {
 
   return (
     <header className="fixed inset-x-0 top-0 z-50 w-full border-b border-sky-200 bg-[linear-gradient(90deg,#fef3c7_0%,#e0f2fe_48%,#fce7f3_100%)] shadow-sm backdrop-blur">
-      <div className="mx-auto flex w-full max-w-4xl items-center gap-4 px-4 py-3 sm:px-6">
+      <div className="mx-auto flex w-full max-w-5xl items-center gap-4 px-4 py-3 sm:px-6">
         <Link className="shrink-0" href="/">
           <Image alt="I WISH ..." className="h-10 w-auto sm:h-12" height={360} priority src="/logo-wordmark.svg" width={1200} />
         </Link>
@@ -66,7 +67,7 @@ export function GlobalHeader() {
                 title={email || undefined}
                 type="button"
               >
-                {`Log out ${email ?? ""}`}
+                {`Log out ${shortAccountName}`}
               </button>
             </>
           ) : (

@@ -35,10 +35,7 @@ export default function Home() {
   return (
     <div className="min-h-screen">
       <main className="mx-auto w-full max-w-5xl px-4 py-8 sm:px-6 sm:py-10">
-        <section className="relative overflow-hidden px-1 pb-4 pt-2 sm:pb-6">
-          <div className="pointer-events-none absolute -left-16 -top-10 h-52 w-52 rounded-full bg-sky-200/55 blur-3xl" />
-          <div className="pointer-events-none absolute -right-12 top-16 h-44 w-44 rounded-full bg-emerald-200/45 blur-3xl" />
-
+        <section className="px-1 pb-4 pt-2 sm:pb-6">
           <h1 className="max-w-4xl text-4xl font-semibold tracking-tight sm:text-5xl">
             Celebrate your moments with gifts chosen from the heart
           </h1>

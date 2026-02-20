@@ -106,6 +106,18 @@ type ArchiveAlertResponse =
     }
   | ApiErrorResponse;
 
+type ActivityFeedResponse =
+  | {
+      ok: true;
+      activities: Array<{
+        kind: "reservation" | "contribution" | "visit";
+        itemId: string | null;
+        status: "active" | "released" | null;
+        happenedAt: string;
+      }>;
+    }
+  | ApiErrorResponse;
+
 type PublicWishlistModel = Extract<PublicWishlistResponse, { ok: true }>;
 
 type ConnectionState = "connecting" | "live" | "disconnected";
@@ -170,12 +182,15 @@ export default function PublicWishlistClient({ shareToken }: { shareToken: strin
   const [actionError, setActionError] = useState<string | null>(null);
   const [actionSuccess, setActionSuccess] = useState<string | null>(null);
   const [reserveConfirmation, setReserveConfirmation] = useState<string | null>(null);
+  const [reservationActionBlink, setReservationActionBlink] = useState<"reserve" | "unreserve" | null>(null);
   const [authEmail, setAuthEmail] = useState<string | null>(null);
+  const [myReservedItemIds, setMyReservedItemIds] = useState<string[]>([]);
   const [archiveAlert, setArchiveAlert] = useState<Extract<ArchiveAlertResponse, { ok: true }>["alert"]>(null);
   const [suggestedItemIds, setSuggestedItemIds] = useState<string[]>([]);
   const [isDismissingArchiveAlert, setIsDismissingArchiveAlert] = useState(false);
   const trackedOpenKeyRef = useRef<string | null>(null);
   const trackedArchiveAlertVersionRef = useRef<string | null>(null);
+  const reservationActionBlinkTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const applyModel = useCallback((nextModel: PublicWishlistModel, preserveScroll: boolean) => {
     if (!preserveScroll || typeof window === "undefined") {
@@ -438,6 +453,53 @@ export default function PublicWishlistClient({ shareToken }: { shareToken: strin
     })();
   }, [authEmail, model, shareToken]);
 
+  useEffect(() => {
+    if (!model || !authEmail) {
+      setMyReservedItemIds([]);
+      return;
+    }
+
+    let cancelled = false;
+
+    void (async () => {
+      try {
+        const response = await fetch(`/api/me/activity?wishlistId=${encodeURIComponent(model.wishlist.id)}`, {
+          headers: {
+            "x-actor-email": authEmail,
+          },
+          cache: "no-store",
+        });
+        const payload = (await response.json()) as ActivityFeedResponse;
+        if (!response.ok || !payload.ok) {
+          if (!cancelled) setMyReservedItemIds([]);
+          return;
+        }
+
+        const latestReservationStatusByItem = new Map<string, { happenedAtMs: number; status: "active" | "released" | null }>();
+        for (const activity of payload.activities) {
+          if (activity.kind !== "reservation" || !activity.itemId) continue;
+          const happenedAtMs = Number.isFinite(Date.parse(activity.happenedAt)) ? Date.parse(activity.happenedAt) : 0;
+          const existing = latestReservationStatusByItem.get(activity.itemId);
+          if (!existing || happenedAtMs >= existing.happenedAtMs) {
+            latestReservationStatusByItem.set(activity.itemId, { happenedAtMs, status: activity.status });
+          }
+        }
+
+        const activeReservationItemIds = Array.from(latestReservationStatusByItem.entries())
+          .filter(([, value]) => value.status === "active")
+          .map(([itemId]) => itemId);
+
+        if (!cancelled) setMyReservedItemIds(activeReservationItemIds);
+      } catch {
+        if (!cancelled) setMyReservedItemIds([]);
+      }
+    })();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [authEmail, model]);
+
   const filteredItems = useMemo(() => {
     if (!model) return [];
 
@@ -482,6 +544,13 @@ export default function PublicWishlistClient({ shareToken }: { shareToken: strin
     if (!model || !activeItemId) return null;
     return model.items.find((item) => item.id === activeItemId) || null;
   }, [activeItemId, model]);
+  const myReservedItemIdSet = useMemo(() => new Set(myReservedItemIds), [myReservedItemIds]);
+  const isReservedByMe = useCallback(
+    (item: PublicItem | null | undefined) => Boolean(item && item.availability === "reserved" && myReservedItemIdSet.has(item.id)),
+    [myReservedItemIdSet],
+  );
+  const activeItemReservedByMe = isReservedByMe(activeItem);
+  const activeItemReservedByOther = Boolean(activeItem && activeItem.availability === "reserved" && !activeItemReservedByMe);
 
   const hasActiveFilters = Boolean(search.trim()) || availabilityFilter !== "all" || fundingFilter !== "all";
   const activeFilterCount =
@@ -497,6 +566,15 @@ export default function PublicWishlistClient({ shareToken }: { shareToken: strin
       return;
     }
     setAuthEmail(actorEmail);
+    if (reservationActionBlinkTimerRef.current) {
+      clearTimeout(reservationActionBlinkTimerRef.current);
+      reservationActionBlinkTimerRef.current = null;
+    }
+    setReservationActionBlink(action);
+    reservationActionBlinkTimerRef.current = setTimeout(() => {
+      setReservationActionBlink(null);
+      reservationActionBlinkTimerRef.current = null;
+    }, 800);
 
     setIsMutating(true);
     setActionError(null);
@@ -533,11 +611,13 @@ export default function PublicWishlistClient({ shareToken }: { shareToken: strin
 
     updateItemInModel(payload.item);
     if (action === "reserve") {
+      setMyReservedItemIds((current) => (current.includes(payload.item.id) ? current : [...current, payload.item.id]));
       closeModal();
       setReserveConfirmation("Item reserved.");
       return;
     }
 
+    setMyReservedItemIds((current) => current.filter((id) => id !== payload.item.id));
     setActionSuccess("Reservation released.");
   }
 
@@ -635,6 +715,11 @@ export default function PublicWishlistClient({ shareToken }: { shareToken: strin
     setActionError(null);
     setActionSuccess(null);
     setContributionInput("");
+    setReservationActionBlink(null);
+    if (reservationActionBlinkTimerRef.current) {
+      clearTimeout(reservationActionBlinkTimerRef.current);
+      reservationActionBlinkTimerRef.current = null;
+    }
     const params = new URLSearchParams(searchParams.toString());
     if (!params.has("item")) return;
     params.delete("item");
@@ -675,11 +760,19 @@ export default function PublicWishlistClient({ shareToken }: { shareToken: strin
     return () => window.clearTimeout(timer);
   }, [reserveConfirmation]);
 
+  useEffect(() => {
+    return () => {
+      if (reservationActionBlinkTimerRef.current) {
+        clearTimeout(reservationActionBlinkTimerRef.current);
+      }
+    };
+  }, []);
+
   return (
     <main className="mx-auto min-h-screen max-w-5xl px-4 py-8 sm:px-6 sm:py-10">
       {reserveConfirmation ? (
-        <div className="pointer-events-none fixed inset-x-0 top-5 z-[60] flex justify-center px-4">
-          <div className="reserve-confirmation rounded-full px-6 py-2.5 text-sm font-semibold text-white shadow-lg">
+        <div className="pointer-events-none fixed inset-0 z-[60] flex items-center justify-center px-4">
+          <div className="reserve-confirmation w-full max-w-[38rem] rounded-full px-12 py-5 text-center text-2xl font-semibold text-white shadow-2xl">
             {reserveConfirmation}
           </div>
         </div>
@@ -805,6 +898,7 @@ export default function PublicWishlistClient({ shareToken }: { shareToken: strin
               prioritizedItems.map((item) => {
                 const progressPercent = Math.max(0, Math.min(100, Math.round(item.progressRatio * 100)));
                 const isSuggested = suggestedOrder.has(item.id);
+                const reservedByMe = isReservedByMe(item);
 
                 return (
                   <article
@@ -842,10 +936,16 @@ export default function PublicWishlistClient({ shareToken }: { shareToken: strin
                             className={`rounded-full px-2.5 py-1 text-xs font-medium ${
                               item.availability === "available"
                                 ? "bg-emerald-100 text-emerald-800"
+                                : reservedByMe
+                                  ? "bg-sky-100 text-sky-800"
                                 : "bg-amber-100 text-amber-900"
                             }`}
                           >
-                            {item.availability === "available" ? "Available" : "Reserved"}
+                            {item.availability === "available"
+                              ? "Available"
+                              : reservedByMe
+                                ? "Reserved by you"
+                                : "Reserved"}
                           </span>
                         </div>
 
@@ -870,7 +970,11 @@ export default function PublicWishlistClient({ shareToken }: { shareToken: strin
                             onClick={() => openModal(item.id)}
                             type="button"
                           >
-                            {item.availability === "available" ? "Reserve" : "View actions"}
+                            {item.availability === "available"
+                              ? "Reserve"
+                              : reservedByMe
+                                ? "Manage reservation"
+                                : "View details"}
                           </button>
                           {item.isGroupFunded ? (
                             <button
@@ -914,25 +1018,40 @@ export default function PublicWishlistClient({ shareToken }: { shareToken: strin
             <section className="mt-4 rounded-xl border border-zinc-200 p-3">
               <h3 className="text-sm font-semibold text-zinc-900">Reservation</h3>
               <p className="mt-1 text-xs text-zinc-600">
-                Current status: {activeItem.availability === "available" ? "Available" : "Reserved"}
+                Current status:{" "}
+                {activeItem.availability === "available"
+                  ? "Available"
+                  : activeItemReservedByMe
+                    ? "Reserved by you"
+                    : "Reserved by another guest"}
               </p>
               <div className="mt-3 flex flex-wrap gap-2">
-                <button
-                  className="rounded-md border border-zinc-300 px-3 py-2 text-sm font-medium text-zinc-800 disabled:opacity-60"
-                  disabled={isMutating}
-                  onClick={() => reserveAction("reserve")}
-                  type="button"
-                >
-                  Reserve
-                </button>
-                <button
-                  className="rounded-md border border-zinc-300 px-3 py-2 text-sm font-medium text-zinc-800 disabled:opacity-60"
-                  disabled={isMutating}
-                  onClick={() => reserveAction("unreserve")}
-                  type="button"
-                >
-                  Release my reservation
-                </button>
+                {activeItem.availability === "available" ? (
+                  <button
+                    className={`rounded-md border border-zinc-300 px-3 py-2 text-sm font-medium text-zinc-800 transition-all duration-200 hover:-translate-y-0.5 hover:border-zinc-400 hover:bg-white hover:shadow-md active:translate-y-0 active:scale-[0.98] disabled:cursor-not-allowed disabled:opacity-60 ${
+                      reservationActionBlink === "reserve" ? "reservation-action-blink" : ""
+                    }`}
+                    disabled={isMutating}
+                    onClick={() => reserveAction("reserve")}
+                    type="button"
+                  >
+                    Reserve
+                  </button>
+                ) : activeItemReservedByMe ? (
+                  <button
+                    className={`rounded-md border border-zinc-300 px-3 py-2 text-sm font-medium text-zinc-800 transition-all duration-200 hover:-translate-y-0.5 hover:border-zinc-400 hover:bg-white hover:shadow-md active:translate-y-0 active:scale-[0.98] disabled:cursor-not-allowed disabled:opacity-60 ${
+                      reservationActionBlink === "unreserve" ? "reservation-action-blink" : ""
+                    }`}
+                    disabled={isMutating}
+                    onClick={() => reserveAction("unreserve")}
+                    type="button"
+                  >
+                    Release my reservation
+                  </button>
+                ) : null}
+                {activeItemReservedByOther ? (
+                  <p className="text-xs font-medium text-zinc-600">This item is already reserved by another guest.</p>
+                ) : null}
               </div>
             </section>
 
@@ -1086,6 +1205,10 @@ export default function PublicWishlistClient({ shareToken }: { shareToken: strin
             reserve-confirmation-gradient 900ms linear infinite;
         }
 
+        .reservation-action-blink {
+          animation: reservation-action-blink 800ms ease-out 1;
+        }
+
         @keyframes filters-sheet-in {
           from {
             opacity: 0;
@@ -1114,6 +1237,25 @@ export default function PublicWishlistClient({ shareToken }: { shareToken: strin
           }
           100% {
             background-position: 100% 50%;
+          }
+        }
+
+        @keyframes reservation-action-blink {
+          0%,
+          100% {
+            opacity: 1;
+          }
+          15%,
+          35%,
+          55%,
+          75% {
+            opacity: 0.2;
+          }
+          25%,
+          45%,
+          65%,
+          85% {
+            opacity: 1;
           }
         }
       `}</style>

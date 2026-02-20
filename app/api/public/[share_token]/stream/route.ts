@@ -23,6 +23,7 @@ type StreamMessage =
       items: Array<{
         id: string;
         title: string;
+        description: string | null;
         url: string | null;
         imageUrl: string | null;
         priceCents: number | null;

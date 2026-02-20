@@ -84,6 +84,11 @@ function mapPrepareUploadError(code: string) {
   if (code === "NOT_FOUND") return errorResponse(404, "NOT_FOUND", "Item not found.");
   if (code === "FORBIDDEN") return errorResponse(403, "FORBIDDEN", "You do not have access to this item.");
   if (code === "ARCHIVED") return errorResponse(409, "VALIDATION_ERROR", "Archived items cannot accept uploads.");
+  if (code === "IMAGE_LIMIT_REACHED") {
+    return errorResponse(422, "VALIDATION_ERROR", "This item already has the maximum of 10 images.", {
+      imageFile: "This item already has the maximum of 10 images.",
+    });
+  }
   if (code === "INVALID_MIME") {
     return errorResponse(422, "VALIDATION_ERROR", "Unsupported image type.", {
       mimeType: "Unsupported image type.",
@@ -106,6 +111,11 @@ function mapUploadError(code: string) {
   if (code === "FORBIDDEN") return errorResponse(403, "FORBIDDEN", "You do not have access to this upload.");
   if (code === "NOT_FOUND") return errorResponse(404, "NOT_FOUND", "Item not found.");
   if (code === "ARCHIVED") return errorResponse(409, "VALIDATION_ERROR", "Archived items cannot accept uploads.");
+  if (code === "IMAGE_LIMIT_REACHED") {
+    return errorResponse(422, "VALIDATION_ERROR", "This item already has the maximum of 10 images.", {
+      imageFile: "This item already has the maximum of 10 images.",
+    });
+  }
   if (code === "INVALID_MIME") {
     return errorResponse(422, "VALIDATION_ERROR", "Uploaded file type does not match request.", {
       mimeType: "Uploaded file type does not match request.",

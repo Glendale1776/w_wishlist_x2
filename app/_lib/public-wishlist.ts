@@ -10,6 +10,7 @@ import {
 export type PublicWishlistItem = {
   id: string;
   title: string;
+  description: string | null;
   url: string | null;
   imageUrl: string | null;
   priceCents: number | null;

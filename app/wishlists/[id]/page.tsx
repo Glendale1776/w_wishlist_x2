@@ -9,15 +9,16 @@ import type { ItemRecord } from "@/app/_lib/item-store";
 
 type ItemFormValues = {
   title: string;
+  description: string;
   url: string;
   price: string;
-  imageUrl: string;
+  imageUrls: string[];
   isGroupFunded: boolean;
   target: string;
 };
 
 type ItemFieldErrors = Partial<
-  Record<"title" | "url" | "priceCents" | "imageUrl" | "targetCents" | "imageFile", string>
+  Record<"title" | "description" | "url" | "priceCents" | "imageUrl" | "imageUrls" | "targetCents" | "imageFile", string>
 >;
 
 type ItemApiResponse =
@@ -98,35 +99,25 @@ type WishlistsListResponse =
       };
     };
 
-type RotateShareLinkResponse =
-  | {
-      ok: true;
-      alreadyProcessed: boolean;
-      rotatedAt: string | null;
-      shareUrl: string | null;
-      shareUrlPreview: string | null;
-      auditEventId?: string;
-    }
-  | {
-      ok: false;
-      error: {
-        code: string;
-        message: string;
-        fieldErrors?: Record<string, string>;
-      };
-    };
+type PendingImage = {
+  id: string;
+  file: File;
+  previewUrl: string;
+};
 
 const EMPTY_FORM: ItemFormValues = {
   title: "",
+  description: "",
   url: "",
   price: "",
-  imageUrl: "",
+  imageUrls: [],
   isGroupFunded: false,
   target: "",
 };
 
 const CLIENT_MAX_UPLOAD_MB = 10;
 const CLIENT_MAX_UPLOAD_BYTES = CLIENT_MAX_UPLOAD_MB * 1024 * 1024;
+const CLIENT_MAX_ITEM_IMAGES = 10;
 const CLIENT_ALLOWED_MIME_TYPES = new Set(["image/jpeg", "image/png", "image/webp", "image/gif"]);
 
 function centsToDisplay(cents: number | null) {
@@ -149,9 +140,10 @@ function buildPayload(wishlistId: string, form: ItemFormValues) {
   return {
     wishlistId,
     title: form.title.trim(),
+    description: form.description.trim() || null,
     url: form.url.trim() || null,
     priceCents,
-    imageUrl: form.imageUrl.trim() || null,
+    imageUrls: form.imageUrls,
     isGroupFunded: form.isGroupFunded,
     targetCents,
   };
@@ -166,6 +158,14 @@ function createIdempotencyKey() {
 
 function isStorageImageRef(value: string | null | undefined) {
   return Boolean(value && value.startsWith("storage://"));
+}
+
+function getItemImageUrls(item: Pick<ItemRecord, "imageUrl" | "imageUrls">): string[] {
+  if (Array.isArray(item.imageUrls) && item.imageUrls.length > 0) {
+    return item.imageUrls.filter(Boolean);
+  }
+  if (item.imageUrl) return [item.imageUrl];
+  return [];
 }
 
 function uploadFileWithProgress(input: {
@@ -233,10 +233,8 @@ export default function WishlistEditorPage() {
   const [isLoading, setIsLoading] = useState(true);
   const [loadError, setLoadError] = useState<string | null>(null);
   const [shareUrlPreview, setShareUrlPreview] = useState<string | null>(null);
-  const [oneTimeShareUrl, setOneTimeShareUrl] = useState<string | null>(null);
-  const [isRotatingShareLink, setIsRotatingShareLink] = useState(false);
-  const [rotateShareLinkError, setRotateShareLinkError] = useState<string | null>(null);
-  const [rotateShareLinkSuccess, setRotateShareLinkSuccess] = useState<string | null>(null);
+  const [shareLinkMessage, setShareLinkMessage] = useState<string | null>(null);
+  const [shareLinkError, setShareLinkError] = useState<string | null>(null);
 
   const [editingItemId, setEditingItemId] = useState<string | null>(null);
   const [form, setForm] = useState<ItemFormValues>(EMPTY_FORM);
@@ -247,14 +245,14 @@ export default function WishlistEditorPage() {
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [isFetchingMetadata, setIsFetchingMetadata] = useState(false);
 
-  const [selectedImageFile, setSelectedImageFile] = useState<File | null>(null);
-  const [localPreviewUrl, setLocalPreviewUrl] = useState<string | null>(null);
-  const [imagePreviewByItemId, setImagePreviewByItemId] = useState<Record<string, string>>({});
+  const [pendingImages, setPendingImages] = useState<PendingImage[]>([]);
+  const [imagePreviewByItemId, setImagePreviewByItemId] = useState<Record<string, string[]>>({});
   const [isUploadingImage, setIsUploadingImage] = useState(false);
   const [uploadProgress, setUploadProgress] = useState(0);
   const [imageMessage, setImageMessage] = useState<string | null>(null);
 
   const fileInputRef = useRef<HTMLInputElement | null>(null);
+  const pendingImagesRef = useRef<PendingImage[]>([]);
 
   const activeItems = useMemo(() => items.filter((item) => !item.archivedAt), [items]);
   const archivedItems = useMemo(() => items.filter((item) => Boolean(item.archivedAt)), [items]);
@@ -270,10 +268,12 @@ export default function WishlistEditorPage() {
   }, [activeItems, editingItemId, form.url]);
 
   const activeEditPreviewUrl = useMemo(() => {
-    if (localPreviewUrl) return localPreviewUrl;
+    if (pendingImages[0]?.previewUrl) return pendingImages[0].previewUrl;
     if (!editingItemId) return null;
-    return imagePreviewByItemId[editingItemId] || null;
-  }, [editingItemId, imagePreviewByItemId, localPreviewUrl]);
+    return imagePreviewByItemId[editingItemId]?.[0] || null;
+  }, [editingItemId, imagePreviewByItemId, pendingImages]);
+
+  const activeImageCount = form.imageUrls.length + pendingImages.length;
 
   useEffect(() => {
     let cancelled = false;
@@ -362,14 +362,16 @@ export default function WishlistEditorPage() {
         return;
       }
 
-      const next: Record<string, string> = {};
+      const next: Record<string, string[]> = {};
 
       await Promise.all(
         items.map(async (item) => {
-          if (!item.imageUrl) return;
+          const imageRefs = getItemImageUrls(item);
+          if (imageRefs.length === 0) return;
+          const firstImageRef = imageRefs[0];
 
-          if (!isStorageImageRef(item.imageUrl)) {
-            next[item.id] = item.imageUrl;
+          if (!isStorageImageRef(firstImageRef)) {
+            next[item.id] = [firstImageRef];
             return;
           }
 
@@ -385,7 +387,7 @@ export default function WishlistEditorPage() {
 
             const payload = (await response.json()) as ImagePreviewResponse;
             if (!response.ok || !payload.ok || !payload.previewUrl) return;
-            next[item.id] = payload.previewUrl;
+            next[item.id] = [payload.previewUrl];
           } catch {
             return;
           }
@@ -405,23 +407,38 @@ export default function WishlistEditorPage() {
   }, [items]);
 
   useEffect(() => {
-    return () => {
-      if (localPreviewUrl) {
-        URL.revokeObjectURL(localPreviewUrl);
-      }
-    };
-  }, [localPreviewUrl]);
+    pendingImagesRef.current = pendingImages;
+  }, [pendingImages]);
 
-  function clearSelectedImage() {
-    setSelectedImageFile(null);
-    setLocalPreviewUrl((current) => {
-      if (current) URL.revokeObjectURL(current);
-      return null;
+  useEffect(() => {
+    return () => {
+      pendingImagesRef.current.forEach((pendingImage) => {
+        URL.revokeObjectURL(pendingImage.previewUrl);
+      });
+    };
+  }, []);
+
+  function clearPendingImages() {
+    setPendingImages((current) => {
+      current.forEach((pendingImage) => {
+        URL.revokeObjectURL(pendingImage.previewUrl);
+      });
+      return [];
     });
 
     if (fileInputRef.current) {
       fileInputRef.current.value = "";
     }
+  }
+
+  function removePendingImage(id: string) {
+    setPendingImages((current) => {
+      const target = current.find((pendingImage) => pendingImage.id === id);
+      if (target) {
+        URL.revokeObjectURL(target.previewUrl);
+      }
+      return current.filter((pendingImage) => pendingImage.id !== id);
+    });
   }
 
   function resetForm() {
@@ -432,7 +449,7 @@ export default function WishlistEditorPage() {
     setFormSuccess(null);
     setMetadataMessage(null);
     setImageMessage(null);
-    clearSelectedImage();
+    clearPendingImages();
     setUploadProgress(0);
   }
 
@@ -456,7 +473,7 @@ export default function WishlistEditorPage() {
       setImagePreviewByItemId((current) => {
         const next = { ...current };
         if (payload.previewUrl) {
-          next[itemId] = payload.previewUrl;
+          next[itemId] = [payload.previewUrl];
         } else {
           delete next[itemId];
         }
@@ -471,9 +488,10 @@ export default function WishlistEditorPage() {
     setEditingItemId(item.id);
     setForm({
       title: item.title,
+      description: item.description || "",
       url: item.url || "",
       price: centsToDisplay(item.priceCents),
-      imageUrl: item.imageUrl || "",
+      imageUrls: getItemImageUrls(item),
       isGroupFunded: item.isGroupFunded,
       target: centsToDisplay(item.targetCents),
     });
@@ -482,10 +500,11 @@ export default function WishlistEditorPage() {
     setFormSuccess(null);
     setMetadataMessage(null);
     setImageMessage(null);
-    clearSelectedImage();
+    clearPendingImages();
     setUploadProgress(0);
 
-    if (item.imageUrl && isStorageImageRef(item.imageUrl)) {
+    const imageRefs = getItemImageUrls(item);
+    if (imageRefs.length > 0 && isStorageImageRef(imageRefs[0])) {
       void hydratePreviewForItem(item.id);
     }
 
@@ -510,39 +529,72 @@ export default function WishlistEditorPage() {
     });
   }
 
-  function onSelectImageFile(event: React.ChangeEvent<HTMLInputElement>) {
-    const file = event.target.files?.[0] || null;
-    if (!file) return;
+  function onSelectImageFiles(event: React.ChangeEvent<HTMLInputElement>) {
+    const files = Array.from(event.target.files || []);
+    if (files.length === 0) return;
 
     setFieldErrors((current) => ({ ...current, imageFile: undefined }));
     setImageMessage(null);
 
-    const normalizedMime = file.type.trim().toLowerCase();
-    if (!CLIENT_ALLOWED_MIME_TYPES.has(normalizedMime)) {
+    const allowedSlots = CLIENT_MAX_ITEM_IMAGES - (form.imageUrls.length + pendingImages.length);
+    if (allowedSlots <= 0) {
       setFieldErrors((current) => ({
         ...current,
-        imageFile: "Only PNG, JPG, WEBP, and GIF images are supported.",
+        imageFile: `Up to ${CLIENT_MAX_ITEM_IMAGES} images are allowed per item.`,
       }));
       event.target.value = "";
       return;
     }
 
-    if (file.size > CLIENT_MAX_UPLOAD_BYTES) {
+    const selected: PendingImage[] = [];
+    let hasValidationError = false;
+
+    for (const file of files) {
+      if (selected.length >= allowedSlots) {
+        hasValidationError = true;
+        break;
+      }
+
+      const normalizedMime = file.type.trim().toLowerCase();
+      if (!CLIENT_ALLOWED_MIME_TYPES.has(normalizedMime)) {
+        hasValidationError = true;
+        continue;
+      }
+
+      if (file.size > CLIENT_MAX_UPLOAD_BYTES) {
+        hasValidationError = true;
+        continue;
+      }
+
+      selected.push({
+        id: createIdempotencyKey(),
+        file,
+        previewUrl: URL.createObjectURL(file),
+      });
+    }
+
+    if (selected.length === 0) {
       setFieldErrors((current) => ({
         ...current,
-        imageFile: `Image must be ${CLIENT_MAX_UPLOAD_MB} MB or smaller.`,
+        imageFile: hasValidationError
+          ? `Add PNG, JPG, WEBP, or GIF images up to ${CLIENT_MAX_UPLOAD_MB} MB each. Maximum ${CLIENT_MAX_ITEM_IMAGES} images per item.`
+          : "Select at least one image.",
       }));
       event.target.value = "";
       return;
     }
 
-    setSelectedImageFile(file);
-    setLocalPreviewUrl((current) => {
-      if (current) URL.revokeObjectURL(current);
-      return URL.createObjectURL(file);
-    });
+    setPendingImages((current) => [...current, ...selected]);
+    if (hasValidationError) {
+      setFieldErrors((current) => ({
+        ...current,
+        imageFile: `Some files were skipped. Use PNG, JPG, WEBP, or GIF up to ${CLIENT_MAX_UPLOAD_MB} MB. Max ${CLIENT_MAX_ITEM_IMAGES} images per item.`,
+      }));
+    }
 
-    setImageMessage(editingItemId ? "Image selected. Save item to upload." : "Image selected. It will upload after item creation.");
+    const imageWord = selected.length === 1 ? "image" : "images";
+    setImageMessage(editingItemId ? `${selected.length} ${imageWord} selected. Save item to upload.` : `${selected.length} ${imageWord} selected. They will upload after item creation.`);
+    event.target.value = "";
   }
 
   async function uploadImageForItem(itemId: string, file: File) {
@@ -607,19 +659,8 @@ export default function WishlistEditorPage() {
     }
 
     setItems((current) => current.map((item) => (item.id === uploadResult.item.id ? uploadResult.item : item)));
-    setForm((current) => ({ ...current, imageUrl: uploadResult.item.imageUrl || "" }));
-
-    setImagePreviewByItemId((current) => {
-      const next = { ...current };
-      if (uploadResult.previewUrl) {
-        next[itemId] = uploadResult.previewUrl;
-      } else {
-        delete next[itemId];
-      }
-      return next;
-    });
-
-    clearSelectedImage();
+    setForm((current) => ({ ...current, imageUrls: getItemImageUrls(uploadResult.item) }));
+    await hydratePreviewForItem(itemId);
     setUploadProgress(100);
     setImageMessage("Image uploaded.");
 
@@ -659,6 +700,10 @@ export default function WishlistEditorPage() {
 
     if (payload.isGroupFunded && Number.isNaN(payload.targetCents)) {
       setFieldErrors({ targetCents: "Target must be a valid decimal amount." });
+      return;
+    }
+    if (payload.imageUrls.length > CLIENT_MAX_ITEM_IMAGES) {
+      setFieldErrors({ imageFile: `Up to ${CLIENT_MAX_ITEM_IMAGES} images are allowed per item.` });
       return;
     }
 
@@ -708,7 +753,10 @@ export default function WishlistEditorPage() {
       setFormSuccess(editingItemId ? "Item updated." : "Item created.");
     }
 
-    if (!result.item.imageUrl) {
+    const currentImageUrls = getItemImageUrls(result.item);
+    const primaryImageRef = currentImageUrls[0] || null;
+
+    if (currentImageUrls.length === 0) {
       setImagePreviewByItemId((current) => {
         const next = { ...current };
         delete next[result.item.id];
@@ -716,14 +764,23 @@ export default function WishlistEditorPage() {
       });
     }
 
-    if (selectedImageFile) {
-      const uploadOutcome = await uploadImageForItem(result.item.id, selectedImageFile);
-      if (!uploadOutcome.ok) {
-        setIsSubmitting(false);
-        setFormError("Item saved, but image upload failed. Retry upload.");
-        return;
+    const queuedImages = [...pendingImages];
+    if (queuedImages.length > 0) {
+      for (let index = 0; index < queuedImages.length; index += 1) {
+        const queuedImage = queuedImages[index];
+        setImageMessage(`Uploading image ${index + 1} of ${queuedImages.length}...`);
+        const uploadOutcome = await uploadImageForItem(result.item.id, queuedImage.file);
+        if (!uploadOutcome.ok) {
+          setIsSubmitting(false);
+          setFormError("Item saved, but at least one image upload failed. Retry remaining images.");
+          return;
+        }
+        removePendingImage(queuedImage.id);
       }
-    } else if (result.item.imageUrl && isStorageImageRef(result.item.imageUrl)) {
+      setImageMessage(
+        queuedImages.length === 1 ? "1 image uploaded." : `${queuedImages.length} images uploaded.`,
+      );
+    } else if (primaryImageRef && isStorageImageRef(primaryImageRef)) {
       await hydratePreviewForItem(result.item.id);
     }
 
@@ -732,7 +789,7 @@ export default function WishlistEditorPage() {
     if (!editingItemId) {
       setForm(EMPTY_FORM);
       setMetadataMessage(null);
-      clearSelectedImage();
+      clearPendingImages();
     }
   }
 
@@ -766,63 +823,12 @@ export default function WishlistEditorPage() {
   async function copyShareLink(value: string) {
     try {
       await navigator.clipboard.writeText(value);
-      setRotateShareLinkSuccess("Share link copied.");
-      setRotateShareLinkError(null);
+      setShareLinkMessage("Wishlist link copied.");
+      setShareLinkError(null);
     } catch {
-      setRotateShareLinkError("Clipboard unavailable. Copy the link manually.");
+      setShareLinkMessage(null);
+      setShareLinkError("Clipboard unavailable. Copy the link manually.");
     }
-  }
-
-  function dismissOneTimeShareLink() {
-    setOneTimeShareUrl(null);
-    setRotateShareLinkSuccess("One-time reveal dismissed.");
-  }
-
-  async function onRotateShareLink() {
-    const ownerEmail = await getAuthenticatedEmail();
-    if (!ownerEmail) {
-      persistReturnTo(`/wishlists/${wishlistId}`);
-      router.replace(`/login?returnTo=${encodeURIComponent(`/wishlists/${wishlistId}`)}`);
-      return;
-    }
-
-    setIsRotatingShareLink(true);
-    setRotateShareLinkError(null);
-    setRotateShareLinkSuccess(null);
-
-    let response: Response;
-    try {
-      response = await fetch(`/api/wishlists/${wishlistId}/rotate-share-link`, {
-        method: "POST",
-        headers: {
-          "x-owner-email": ownerEmail,
-          "x-idempotency-key": createIdempotencyKey(),
-        },
-      });
-    } catch {
-      setIsRotatingShareLink(false);
-      setRotateShareLinkError("Unable to rotate share link right now. Please retry.");
-      return;
-    }
-
-    const payload = (await response.json()) as RotateShareLinkResponse;
-    setIsRotatingShareLink(false);
-
-    if (!response.ok || !payload.ok) {
-      const message = payload && !payload.ok ? payload.error.message : "Unable to rotate share link right now.";
-      setRotateShareLinkError(message);
-      return;
-    }
-
-    if (payload.alreadyProcessed) {
-      setOneTimeShareUrl(null);
-      setRotateShareLinkSuccess("Rotation already processed. Generate again for a new one-time link.");
-      return;
-    }
-
-    setOneTimeShareUrl(payload.shareUrl);
-    setShareUrlPreview(payload.shareUrlPreview);
-    setRotateShareLinkSuccess("Share link rotated. Copy the new link now before dismissing.");
   }
 
   async function onAutofillFromUrl() {
@@ -863,7 +869,9 @@ export default function WishlistEditorPage() {
           ok: true;
           metadata: {
             title: string | null;
+            description: string | null;
             imageUrl: string | null;
+            imageUrls?: string[] | null;
             priceCents: number | null;
           };
         }
@@ -885,28 +893,40 @@ export default function WishlistEditorPage() {
     setForm((prev) => {
       const priceFromMeta = payload.metadata.priceCents !== null ? centsToDisplay(payload.metadata.priceCents) : prev.price;
       const nextTarget = prev.isGroupFunded ? prev.target || priceFromMeta : prev.target;
+      const metadataImageUrls = Array.isArray(payload.metadata.imageUrls)
+        ? payload.metadata.imageUrls.map((url) => (url || "").trim()).filter(Boolean)
+        : [];
+      const fallbackSingleImage = payload.metadata.imageUrl?.trim() || "";
+      if (metadataImageUrls.length === 0 && fallbackSingleImage) {
+        metadataImageUrls.push(fallbackSingleImage);
+      }
+      const mergedImageUrls = Array.from(new Set([...prev.imageUrls, ...metadataImageUrls])).slice(
+        0,
+        CLIENT_MAX_ITEM_IMAGES,
+      );
 
       return {
         ...prev,
         title: payload.metadata.title || prev.title,
-        imageUrl: payload.metadata.imageUrl || prev.imageUrl,
+        description: payload.metadata.description || prev.description,
+        imageUrls: mergedImageUrls,
         price: priceFromMeta,
         target: nextTarget,
       };
     });
 
-    setMetadataMessage("Autofill complete. Review fields before saving.");
+    setMetadataMessage("AI autofill complete. Review fields before saving.");
   }
 
-  async function onRemoveImage() {
+  async function onRemoveImages() {
     setFormError(null);
     setFormSuccess(null);
     setImageMessage(null);
 
     if (!editingItemId) {
-      setForm((current) => ({ ...current, imageUrl: "" }));
-      clearSelectedImage();
-      setImageMessage("Image removed from draft.");
+      setForm((current) => ({ ...current, imageUrls: [] }));
+      clearPendingImages();
+      setImageMessage("Images removed from draft.");
       return;
     }
 
@@ -917,7 +937,7 @@ export default function WishlistEditorPage() {
       return;
     }
 
-    const payload = buildPayload(wishlistId, { ...form, imageUrl: "" });
+    const payload = buildPayload(wishlistId, { ...form, imageUrls: [] });
 
     if (!payload.title) {
       setFieldErrors({ title: "Item title is required." });
@@ -965,17 +985,17 @@ export default function WishlistEditorPage() {
     }
 
     setItems((current) => current.map((item) => (item.id === result.item.id ? result.item : item)));
-    setForm((current) => ({ ...current, imageUrl: "" }));
+    setForm((current) => ({ ...current, imageUrls: [] }));
     setImagePreviewByItemId((current) => {
       const next = { ...current };
       delete next[editingItemId];
       return next;
     });
-    clearSelectedImage();
-    setFormSuccess("Image removed.");
+    clearPendingImages();
+    setFormSuccess("Images removed.");
   }
 
-  const imageButtonLabel = activeEditPreviewUrl || form.imageUrl ? "Replace image" : "Upload image";
+  const imageButtonLabel = activeImageCount > 0 ? "Add images" : "Upload images";
 
   return (
     <main className="mx-auto min-h-screen max-w-5xl px-4 py-8 sm:px-6 sm:py-10">
@@ -984,10 +1004,25 @@ export default function WishlistEditorPage() {
           <h1 className="text-2xl font-semibold tracking-tight">Wishlist editor</h1>
           <p className="mt-1 text-sm text-zinc-600">Manage item details and archive items after activity.</p>
         </div>
-        <Link className="rounded-md border border-zinc-300 px-3 py-2 text-sm font-medium text-zinc-800" href="/wishlists">
-          Back to My wishlists
-        </Link>
+        <div className="flex flex-wrap items-center justify-end gap-2">
+          <button
+            className="rounded-full bg-gradient-to-r from-sky-500 to-blue-600 px-5 py-2.5 text-sm font-semibold text-white shadow-sm disabled:cursor-not-allowed disabled:opacity-60"
+            disabled={!shareUrlPreview}
+            onClick={() => {
+              if (!shareUrlPreview) return;
+              void copyShareLink(shareUrlPreview);
+            }}
+            type="button"
+          >
+            {shareUrlPreview ? "Copy wishlist link" : "Wishlist link unavailable"}
+          </button>
+          <Link className="rounded-full border border-zinc-300 px-4 py-2 text-sm font-medium text-zinc-800" href="/wishlists">
+            Back to My wishlists
+          </Link>
+        </div>
       </header>
+      {shareLinkError ? <p className="mt-2 text-sm text-rose-700">{shareLinkError}</p> : null}
+      {shareLinkMessage ? <p className="mt-2 text-sm text-emerald-700">{shareLinkMessage}</p> : null}
 
       <section className="mt-6 grid gap-6 lg:grid-cols-[1fr_1.2fr]">
         <aside className="rounded-2xl border border-zinc-200 bg-white p-5 shadow-sm">
@@ -999,64 +1034,6 @@ export default function WishlistEditorPage() {
               </button>
             ) : null}
           </div>
-
-          <section className="mt-4 rounded-xl border border-zinc-200 bg-zinc-50 p-3">
-            <h3 className="text-sm font-semibold text-zinc-900">Share link settings</h3>
-            <p className="mt-1 text-xs text-zinc-600">
-              Regenerating is immediate and invalidates the previous public link.
-            </p>
-
-            <div className="mt-3 rounded-md border border-zinc-200 bg-white p-3">
-              <p className="text-xs font-medium text-zinc-700">Current share link</p>
-              <p className="mt-1 break-all text-xs text-zinc-600">{shareUrlPreview || "Unavailable until wishlist sync completes."}</p>
-
-              <div className="mt-3 flex flex-wrap gap-2">
-                {shareUrlPreview ? (
-                  <button
-                    className="rounded-md border border-zinc-300 px-3 py-2 text-xs font-medium text-zinc-800"
-                    onClick={() => copyShareLink(shareUrlPreview)}
-                    type="button"
-                  >
-                    Copy current link
-                  </button>
-                ) : null}
-                <button
-                  className="rounded-md border border-rose-300 px-3 py-2 text-xs font-medium text-rose-800 disabled:opacity-60"
-                  disabled={isRotatingShareLink}
-                  onClick={onRotateShareLink}
-                  type="button"
-                >
-                  {isRotatingShareLink ? "Regenerating..." : "Regenerate link"}
-                </button>
-              </div>
-            </div>
-
-            {oneTimeShareUrl ? (
-              <div className="mt-3 rounded-md border border-amber-300 bg-amber-50 p-3">
-                <p className="text-xs font-semibold text-amber-900">One-time reveal: copy this new link now.</p>
-                <p className="mt-1 break-all text-xs text-amber-900">{oneTimeShareUrl}</p>
-                <div className="mt-3 flex flex-wrap gap-2">
-                  <button
-                    className="rounded-md border border-amber-400 px-3 py-2 text-xs font-medium text-amber-900"
-                    onClick={() => copyShareLink(oneTimeShareUrl)}
-                    type="button"
-                  >
-                    Copy new link
-                  </button>
-                  <button
-                    className="rounded-md border border-amber-400 px-3 py-2 text-xs font-medium text-amber-900"
-                    onClick={dismissOneTimeShareLink}
-                    type="button"
-                  >
-                    Dismiss reveal
-                  </button>
-                </div>
-              </div>
-            ) : null}
-
-            {rotateShareLinkError ? <p className="mt-2 text-xs text-rose-700">{rotateShareLinkError}</p> : null}
-            {rotateShareLinkSuccess ? <p className="mt-2 text-xs text-emerald-700">{rotateShareLinkSuccess}</p> : null}
-          </section>
 
           <form className="mt-4 space-y-4" onSubmit={onSubmit} noValidate>
             <div>
@@ -1070,6 +1047,20 @@ export default function WishlistEditorPage() {
                 value={form.title}
               />
               {fieldErrors.title ? <p className="mt-1 text-xs text-rose-700">{fieldErrors.title}</p> : null}
+            </div>
+
+            <div>
+              <label className="mb-1 block text-sm font-medium text-zinc-800" htmlFor="item-description">
+                Item description
+              </label>
+              <textarea
+                className="min-h-24 w-full rounded-md border border-zinc-300 px-3 py-2 text-sm outline-none focus:border-zinc-500"
+                id="item-description"
+                onChange={(event) => setForm((prev) => ({ ...prev, description: event.target.value }))}
+                placeholder="Add crucial requirements like preferred color, size, and specific model details."
+                value={form.description}
+              />
+              {fieldErrors.description ? <p className="mt-1 text-xs text-rose-700">{fieldErrors.description}</p> : null}
             </div>
 
             <div>
@@ -1120,7 +1111,7 @@ export default function WishlistEditorPage() {
               </div>
 
               <div className="rounded-md border border-zinc-200 bg-zinc-50 p-3">
-                <p className="text-sm font-medium text-zinc-800">Item image</p>
+                <p className="text-sm font-medium text-zinc-800">Item images</p>
                 <div className="mt-2 overflow-hidden rounded-md border border-zinc-200 bg-white">
                   {activeEditPreviewUrl ? (
                     // eslint-disable-next-line @next/next/no-img-element
@@ -1137,7 +1128,8 @@ export default function WishlistEditorPage() {
                 <input
                   accept="image/jpeg,image/png,image/webp,image/gif"
                   className="hidden"
-                  onChange={onSelectImageFile}
+                  multiple
+                  onChange={onSelectImageFiles}
                   ref={fileInputRef}
                   type="file"
                 />
@@ -1150,18 +1142,37 @@ export default function WishlistEditorPage() {
                   >
                     {imageButtonLabel}
                   </button>
-                  {activeEditPreviewUrl || form.imageUrl || selectedImageFile ? (
+                  {activeImageCount > 0 ? (
                     <button
                       className="rounded-md border border-rose-300 px-3 py-2 text-xs font-medium text-rose-800"
-                      onClick={onRemoveImage}
+                      onClick={onRemoveImages}
                       type="button"
                     >
-                      Remove image
+                      Clear all images
                     </button>
                   ) : null}
                 </div>
 
-                <p className="mt-2 text-xs text-zinc-600">PNG, JPG, WEBP, or GIF up to 10 MB.</p>
+                <p className="mt-2 text-xs text-zinc-600">
+                  {activeImageCount}/{CLIENT_MAX_ITEM_IMAGES} images selected. PNG, JPG, WEBP, or GIF up to 10 MB each.
+                </p>
+
+                {pendingImages.length > 0 ? (
+                  <ul className="mt-2 space-y-1 rounded-md border border-zinc-200 bg-white p-2 text-xs text-zinc-700">
+                    {pendingImages.map((pendingImage) => (
+                      <li className="flex items-center justify-between gap-2" key={pendingImage.id}>
+                        <span className="truncate">{pendingImage.file.name}</span>
+                        <button
+                          className="rounded border border-zinc-300 px-2 py-0.5 font-medium text-zinc-700"
+                          onClick={() => removePendingImage(pendingImage.id)}
+                          type="button"
+                        >
+                          Remove
+                        </button>
+                      </li>
+                    ))}
+                  </ul>
+                ) : null}
 
                 {isUploadingImage ? (
                   <div className="mt-2 rounded-md border border-zinc-200 bg-white px-2 py-1">
@@ -1235,12 +1246,12 @@ export default function WishlistEditorPage() {
               <article className="rounded-xl border border-zinc-200 bg-white p-4 shadow-sm" key={item.id}>
                 <div className="flex flex-wrap items-start gap-3">
                   <div className="h-20 w-20 shrink-0 overflow-hidden rounded-md border border-zinc-200 bg-zinc-50">
-                    {imagePreviewByItemId[item.id] ? (
+                    {imagePreviewByItemId[item.id]?.[0] ? (
                       // eslint-disable-next-line @next/next/no-img-element
                       <img
                         alt={`${item.title} preview`}
                         className="h-full w-full object-cover"
-                        src={imagePreviewByItemId[item.id]}
+                        src={imagePreviewByItemId[item.id][0]}
                       />
                     ) : (
                       <div className="flex h-full items-center justify-center text-[11px] text-zinc-500">No image</div>
@@ -1251,9 +1262,13 @@ export default function WishlistEditorPage() {
                     <div className="flex flex-wrap items-start justify-between gap-3">
                       <div>
                         <h3 className="text-base font-semibold text-zinc-900">{item.title}</h3>
+                        {item.description ? <p className="mt-1 text-xs text-zinc-700">{item.description}</p> : null}
                         <p className="mt-1 text-xs text-zinc-600">
                           {item.url ? item.url : "No product URL"} •{" "}
                           {item.priceCents !== null ? `$${(item.priceCents / 100).toFixed(2)}` : "No price"}
+                        </p>
+                        <p className="mt-1 text-xs text-zinc-600">
+                          Images: {getItemImageUrls(item).length}/{CLIENT_MAX_ITEM_IMAGES}
                         </p>
                         {item.isGroupFunded ? (
                           <p className="mt-1 text-xs text-zinc-600">

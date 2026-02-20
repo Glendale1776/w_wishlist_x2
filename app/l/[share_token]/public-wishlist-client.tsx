@@ -19,6 +19,7 @@ type ApiErrorResponse = {
 type PublicItem = {
   id: string;
   title: string;
+  description: string | null;
   url: string | null;
   imageUrl: string | null;
   priceCents: number | null;
@@ -632,6 +633,7 @@ export default function PublicWishlistClient({ shareToken }: { shareToken: strin
                         <div className="flex flex-wrap items-start justify-between gap-3">
                           <div>
                             <h2 className="text-base font-semibold text-zinc-900">{item.title}</h2>
+                            {item.description ? <p className="mt-1 text-xs text-zinc-700">{item.description}</p> : null}
                             <p className="mt-1 text-xs text-zinc-600">
                               {formatMoney(item.priceCents, model.wishlist.currency)}
                               {item.url ? ` • ${item.url}` : ""}
@@ -697,6 +699,7 @@ export default function PublicWishlistClient({ shareToken }: { shareToken: strin
             <div className="flex items-start justify-between gap-3">
               <div>
                 <h2 className="text-lg font-semibold text-zinc-900">{activeItem.title}</h2>
+                {activeItem.description ? <p className="mt-1 text-xs text-zinc-700">{activeItem.description}</p> : null}
                 <p className="mt-1 text-xs text-zinc-600">{formatMoney(activeItem.priceCents, model?.wishlist.currency || "USD")}</p>
               </div>
               <button className="rounded-md border border-zinc-300 px-2.5 py-1.5 text-xs font-medium text-zinc-800" onClick={closeModal} type="button">

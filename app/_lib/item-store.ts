@@ -7,9 +7,11 @@ export type ItemRecord = {
   wishlistId: string;
   ownerEmail: string;
   title: string;
+  description: string | null;
   url: string | null;
   priceCents: number | null;
   imageUrl: string | null;
+  imageUrls: string[];
   isGroupFunded: boolean;
   targetCents: number | null;
   archivedAt: string | null;
@@ -97,7 +99,8 @@ export type PrepareImageUploadError =
   | "ARCHIVED"
   | "INVALID_MIME"
   | "FILE_TOO_LARGE"
-  | "INVALID_SIZE";
+  | "INVALID_SIZE"
+  | "IMAGE_LIMIT_REACHED";
 
 export type UploadItemImageError =
   | "INVALID_UPLOAD_TOKEN"
@@ -107,7 +110,8 @@ export type UploadItemImageError =
   | "INVALID_MIME"
   | "FILE_TOO_LARGE"
   | "INVALID_SIZE"
-  | "STORAGE_UPLOAD_FAILED";
+  | "STORAGE_UPLOAD_FAILED"
+  | "IMAGE_LIMIT_REACHED";
 
 export type CreatePreviewError = "NOT_FOUND" | "FORBIDDEN";
 export type ResolvePreviewError = "INVALID_PREVIEW_TOKEN" | "NOT_FOUND";
@@ -119,6 +123,7 @@ export type ContributionMutationError = "NOT_FOUND" | "ARCHIVED" | "NOT_GROUP_FU
 export type PublicItemReadModel = {
   id: string;
   title: string;
+  description: string | null;
   url: string | null;
   imageUrl: string | null;
   priceCents: number | null;
@@ -157,6 +162,7 @@ export type IdempotencyReadResult =
 
 const STORAGE_PREFIX = "storage://";
 const RATE_LIMIT_WINDOW_MS = 60_000;
+const ITEM_IMAGE_LIMIT = 10;
 
 type ItemStore = {
   items: ItemRecord[];
@@ -235,6 +241,29 @@ function isStorageRef(value: string | null | undefined): value is string {
 
 function parseStoragePath(reference: string): string {
   return reference.slice(STORAGE_PREFIX.length);
+}
+
+function getItemImageUrls(item: Pick<ItemRecord, "imageUrl" | "imageUrls">): string[] {
+  if (Array.isArray(item.imageUrls) && item.imageUrls.length > 0) {
+    return item.imageUrls.filter(Boolean);
+  }
+  if (item.imageUrl) return [item.imageUrl];
+  return [];
+}
+
+function normalizeImageUrls(input: Array<string | null | undefined>): string[] {
+  const normalized: string[] = [];
+  const seen = new Set<string>();
+
+  for (const value of input) {
+    const trimmed = (value || "").trim();
+    if (!trimmed || seen.has(trimmed)) continue;
+    seen.add(trimmed);
+    normalized.push(trimmed);
+    if (normalized.length >= ITEM_IMAGE_LIMIT) break;
+  }
+
+  return normalized;
 }
 
 function removeImageByPath(path: string) {
@@ -326,6 +355,7 @@ function buildPublicItemReadModel(item: ItemRecord): PublicItemReadModel {
   return {
     id: item.id,
     title: item.title,
+    description: item.description,
     url: item.url,
     imageUrl: item.imageUrl && !isStorageRef(item.imageUrl) ? item.imageUrl : null,
     priceCents: item.priceCents,
@@ -355,9 +385,11 @@ export function createItem(input: {
   wishlistId: string;
   ownerEmail: string;
   title: string;
+  description: string | null;
   url: string | null;
   priceCents: number | null;
   imageUrl: string | null;
+  imageUrls?: string[] | null;
   isGroupFunded: boolean;
   targetCents: number | null;
 }) {
@@ -371,14 +403,18 @@ export function createItem(input: {
       })
     : false;
 
+  const normalizedImages = normalizeImageUrls([...(input.imageUrls || []), input.imageUrl]);
+
   const item: ItemRecord = {
     id: randomUUID(),
     wishlistId: input.wishlistId,
     ownerEmail: input.ownerEmail,
     title: input.title,
+    description: input.description,
     url: input.url,
     priceCents: input.priceCents,
-    imageUrl: input.imageUrl,
+    imageUrl: normalizedImages[0] || null,
+    imageUrls: normalizedImages,
     isGroupFunded: input.isGroupFunded,
     targetCents: input.targetCents,
     archivedAt: null,
@@ -400,9 +436,11 @@ export function updateItem(input: {
   itemId: string;
   ownerEmail: string;
   title: string;
+  description: string | null;
   url: string | null;
   priceCents: number | null;
   imageUrl: string | null;
+  imageUrls?: string[] | null;
   isGroupFunded: boolean;
   targetCents: number | null;
 }) {
@@ -420,18 +458,28 @@ export function updateItem(input: {
       })
     : false;
 
-  const previousImageUrl = found.imageUrl;
+  const previousImageUrls = getItemImageUrls(found);
+  const nextImageUrls = normalizeImageUrls(
+    input.imageUrls ? [...input.imageUrls] : [input.imageUrl],
+  );
 
   found.title = input.title;
+  found.description = input.description;
   found.url = input.url;
   found.priceCents = input.priceCents;
-  found.imageUrl = input.imageUrl;
+  found.imageUrls = nextImageUrls;
+  found.imageUrl = nextImageUrls[0] || null;
   found.isGroupFunded = input.isGroupFunded;
   found.targetCents = input.targetCents;
   found.updatedAt = nowIso();
 
-  if (previousImageUrl && previousImageUrl !== found.imageUrl && isStorageRef(previousImageUrl)) {
-    removeImageByPath(parseStoragePath(previousImageUrl));
+  const nextSet = new Set(nextImageUrls.filter(isStorageRef).map((value) => parseStoragePath(value)));
+  for (const previousImageUrl of previousImageUrls) {
+    if (!isStorageRef(previousImageUrl)) continue;
+    const previousPath = parseStoragePath(previousImageUrl);
+    if (!nextSet.has(previousPath)) {
+      removeImageByPath(previousPath);
+    }
   }
 
   logAudit("update", found.id, input.ownerEmail, found.wishlistId);
@@ -760,6 +808,9 @@ export function prepareItemImageUpload(input: {
   if (item.archivedAt) {
     return { error: "ARCHIVED" as PrepareImageUploadError };
   }
+  if (getItemImageUrls(item).length >= ITEM_IMAGE_LIMIT) {
+    return { error: "IMAGE_LIMIT_REACHED" as PrepareImageUploadError };
+  }
 
   if (!Number.isInteger(input.sizeBytes) || input.sizeBytes <= 0) {
     return { error: "INVALID_SIZE" as PrepareImageUploadError };
@@ -844,6 +895,10 @@ export async function uploadItemImage(input: {
     store.uploadTickets.splice(ticketIndex, 1);
     return { error: "ARCHIVED" as UploadItemImageError };
   }
+  if (getItemImageUrls(item).length >= ITEM_IMAGE_LIMIT) {
+    store.uploadTickets.splice(ticketIndex, 1);
+    return { error: "IMAGE_LIMIT_REACHED" as UploadItemImageError };
+  }
 
   const supabase = getSupabaseAdminClient();
   const bucket = getSupabaseStorageBucket();
@@ -856,16 +911,13 @@ export async function uploadItemImage(input: {
     return { error: "STORAGE_UPLOAD_FAILED" as UploadItemImageError };
   }
 
+  const previousImageUrls = getItemImageUrls(item);
   const previousStoragePath = item.imageUrl && isStorageRef(item.imageUrl) ? parseStoragePath(item.imageUrl) : null;
-  if (item.imageUrl && isStorageRef(item.imageUrl)) {
-    const previousPath = parseStoragePath(item.imageUrl);
-    if (previousPath !== ticket.path) {
-      removeImageByPath(previousPath);
-    }
-  }
+  const nextImageUrls = normalizeImageUrls([...previousImageUrls, `${STORAGE_PREFIX}${ticket.path}`]);
 
   const nextTimestamp = nowIso();
-  item.imageUrl = `${STORAGE_PREFIX}${ticket.path}`;
+  item.imageUrls = nextImageUrls;
+  item.imageUrl = nextImageUrls[0] || null;
   item.updatedAt = nextTimestamp;
   logAudit("update", item.id, item.ownerEmail, item.wishlistId);
 
@@ -889,21 +941,22 @@ export function createItemImagePreview(input: { itemId: string; ownerEmail: stri
     return { error: "FORBIDDEN" as CreatePreviewError };
   }
 
-  if (!item.imageUrl) {
+  const candidateRef = getItemImageUrls(item)[0] || null;
+  if (!candidateRef) {
     return {
       externalUrl: null as string | null,
       storagePath: null as string | null,
     };
   }
 
-  if (!isStorageRef(item.imageUrl)) {
+  if (!isStorageRef(candidateRef)) {
     return {
-      externalUrl: item.imageUrl,
+      externalUrl: candidateRef,
       storagePath: null as string | null,
     };
   }
 
-  const path = parseStoragePath(item.imageUrl);
+  const path = parseStoragePath(candidateRef);
   return {
     externalUrl: null as string | null,
     storagePath: path,

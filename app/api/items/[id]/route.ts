@@ -6,14 +6,18 @@ const EMAIL_REGEX = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 const URL_REGEX = /^https?:\/\//i;
 const STORAGE_URL_REGEX = /^storage:\/\//i;
 const TITLE_MAX = 120;
+const DESCRIPTION_MAX = 600;
+const IMAGE_LIMIT = 10;
 
 type ApiErrorCode = "AUTH_REQUIRED" | "VALIDATION_ERROR" | "FORBIDDEN" | "NOT_FOUND";
 
 type ItemPayload = {
   title?: string;
+  description?: string | null;
   url?: string | null;
   priceCents?: number | null;
   imageUrl?: string | null;
+  imageUrls?: string[] | null;
   isGroupFunded?: boolean;
   targetCents?: number | null;
 };
@@ -37,18 +41,34 @@ function ownerEmailFromHeader(request: NextRequest) {
 function validatePayload(body: ItemPayload) {
   const fieldErrors: Record<string, string> = {};
   const title = (body.title || "").trim();
+  const description = body.description?.trim() || null;
   const url = body.url?.trim() || null;
   const imageUrl = body.imageUrl?.trim() || null;
+  const imageUrls = Array.isArray(body.imageUrls)
+    ? body.imageUrls.map((value) => (value || "").trim()).filter(Boolean)
+    : [];
   const priceCents = body.priceCents ?? null;
   const isGroupFunded = Boolean(body.isGroupFunded);
   const targetCents = body.targetCents ?? null;
 
   if (!title) fieldErrors.title = "Item title is required.";
   if (title.length > TITLE_MAX) fieldErrors.title = `Item title must be ${TITLE_MAX} chars or less.`;
+  if (description && description.length > DESCRIPTION_MAX) {
+    fieldErrors.description = `Description must be ${DESCRIPTION_MAX} chars or less.`;
+  }
 
   if (url && !URL_REGEX.test(url)) fieldErrors.url = "URL must start with http:// or https://";
   if (imageUrl && !URL_REGEX.test(imageUrl) && !STORAGE_URL_REGEX.test(imageUrl)) {
     fieldErrors.imageUrl = "Image URL must start with http://, https://, or storage://";
+  }
+  for (const entry of imageUrls) {
+    if (!URL_REGEX.test(entry) && !STORAGE_URL_REGEX.test(entry)) {
+      fieldErrors.imageUrls = "Each image URL must start with http://, https://, or storage://";
+      break;
+    }
+  }
+  if (imageUrls.length > IMAGE_LIMIT) {
+    fieldErrors.imageUrls = `Up to ${IMAGE_LIMIT} images are allowed per item.`;
   }
 
   if (priceCents !== null && (!Number.isInteger(priceCents) || priceCents < 0)) {
@@ -67,9 +87,11 @@ function validatePayload(body: ItemPayload) {
     fieldErrors,
     value: {
       title,
+      description,
       url,
       priceCents,
       imageUrl,
+      imageUrls,
       isGroupFunded,
       targetCents: isGroupFunded ? targetCents : null,
     },
@@ -100,9 +122,11 @@ export async function PATCH(request: NextRequest, context: { params: Promise<{ i
     itemId: id,
     ownerEmail,
     title: validated.value.title,
+    description: validated.value.description,
     url: validated.value.url,
     priceCents: validated.value.priceCents,
     imageUrl: validated.value.imageUrl,
+    imageUrls: validated.value.imageUrls,
     isGroupFunded: validated.value.isGroupFunded,
     targetCents: validated.value.targetCents,
   });

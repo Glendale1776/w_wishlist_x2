@@ -162,7 +162,8 @@ function isStorageImageRef(value: string | null | undefined) {
 
 function getItemImageUrls(item: Pick<ItemRecord, "imageUrl" | "imageUrls">): string[] {
   if (Array.isArray(item.imageUrls) && item.imageUrls.length > 0) {
-    return item.imageUrls.filter(Boolean);
+    const normalized = item.imageUrls.filter(Boolean);
+    if (normalized.length > 0) return normalized;
   }
   if (item.imageUrl) return [item.imageUrl];
   return [];
@@ -391,22 +392,12 @@ export default function WishlistEditorPage() {
             return;
           }
 
-          try {
-            const response = await fetch(`/api/items/${item.id}/image-upload-url`, {
-              method: "POST",
-              headers: {
-                "content-type": "application/json",
-                "x-owner-email": ownerEmail,
-              },
-              body: JSON.stringify({ mode: "preview" }),
-            });
-
-            const payload = (await response.json()) as ImagePreviewResponse;
-            if (!response.ok || !payload.ok || !payload.previewUrl) return;
-            next[item.id] = [payload.previewUrl];
-          } catch {
-            return;
-          }
+          const previewUrl = await fetchSignedPreviewUrl({
+            itemId: item.id,
+            ownerEmail,
+          });
+          if (!previewUrl) return;
+          next[item.id] = [previewUrl];
         }),
       );
 
@@ -490,35 +481,59 @@ export default function WishlistEditorPage() {
     setUploadProgress(0);
   }
 
+  async function fetchSignedPreviewUrl(input: {
+    itemId: string;
+    ownerEmail: string;
+    imageIndex?: number;
+  }): Promise<string | null> {
+    async function requestPreview() {
+      try {
+        const response = await fetch(`/api/items/${input.itemId}/image-upload-url`, {
+          method: "POST",
+          headers: {
+            "content-type": "application/json",
+            "x-owner-email": input.ownerEmail,
+          },
+          body: JSON.stringify({
+            mode: "preview",
+            ...(input.imageIndex !== undefined ? { imageIndex: input.imageIndex } : {}),
+          }),
+        });
+
+        const payload = (await response.json()) as ImagePreviewResponse;
+        if (!response.ok || !payload.ok || !payload.previewUrl) return null;
+        return payload.previewUrl;
+      } catch {
+        return null;
+      }
+    }
+
+    const firstAttempt = await requestPreview();
+    if (firstAttempt) return firstAttempt;
+
+    // Retry once to smooth transient signed URL failures.
+    await new Promise((resolve) => window.setTimeout(resolve, 120));
+    return requestPreview();
+  }
+
   async function hydratePreviewForItem(itemId: string) {
     const ownerEmail = await getAuthenticatedEmail();
     if (!ownerEmail) return;
 
-    try {
-      const response = await fetch(`/api/items/${itemId}/image-upload-url`, {
-        method: "POST",
-        headers: {
-          "content-type": "application/json",
-          "x-owner-email": ownerEmail,
-        },
-        body: JSON.stringify({ mode: "preview" }),
-      });
+    const previewUrl = await fetchSignedPreviewUrl({
+      itemId,
+      ownerEmail,
+    });
 
-      const payload = (await response.json()) as ImagePreviewResponse;
-      if (!response.ok || !payload.ok) return;
-
-      setImagePreviewByItemId((current) => {
-        const next = { ...current };
-        if (payload.previewUrl) {
-          next[itemId] = [payload.previewUrl];
-        } else {
-          delete next[itemId];
-        }
-        return next;
-      });
-    } catch {
-      return;
-    }
+    setImagePreviewByItemId((current) => {
+      const next = { ...current };
+      if (previewUrl) {
+        next[itemId] = [previewUrl];
+      } else {
+        delete next[itemId];
+      }
+      return next;
+    });
   }
 
   function closeItemReview() {
@@ -532,13 +547,14 @@ export default function WishlistEditorPage() {
 
   async function openItemReview(item: ItemRecord) {
     const imageRefs = getItemImageUrls(item);
+    const cachedFirstPreview = imagePreviewByItemId[item.id]?.[0] || null;
     const nextToken = createIdempotencyKey();
     reviewLoadTokenRef.current = nextToken;
 
     setReviewingItemId(item.id);
     setReviewImageError(null);
     setReviewImageIndex(0);
-    setReviewImageUrls([]);
+    setReviewImageUrls(cachedFirstPreview ? [cachedFirstPreview] : []);
 
     if (imageRefs.length === 0) {
       setReviewImageUrls([]);
@@ -560,22 +576,14 @@ export default function WishlistEditorPage() {
       imageRefs.map(async (imageRef, imageIndex) => {
         if (!isStorageImageRef(imageRef)) return imageRef;
 
-        try {
-          const response = await fetch(`/api/items/${item.id}/image-upload-url`, {
-            method: "POST",
-            headers: {
-              "content-type": "application/json",
-              "x-owner-email": ownerEmail,
-            },
-            body: JSON.stringify({ mode: "preview", imageIndex }),
-          });
-
-          const payload = (await response.json()) as ImagePreviewResponse;
-          if (!response.ok || !payload.ok || !payload.previewUrl) return null;
-          return payload.previewUrl;
-        } catch {
-          return null;
-        }
+        const previewUrl = await fetchSignedPreviewUrl({
+          itemId: item.id,
+          ownerEmail,
+          imageIndex,
+        });
+        if (previewUrl) return previewUrl;
+        if (imageIndex === 0 && cachedFirstPreview) return cachedFirstPreview;
+        return null;
       }),
     );
 
@@ -583,7 +591,7 @@ export default function WishlistEditorPage() {
       return;
     }
 
-    const nextUrls = resolved.filter((value): value is string => Boolean(value));
+    const nextUrls = Array.from(new Set(resolved.filter((value): value is string => Boolean(value))));
     setReviewImageUrls(nextUrls);
     setIsLoadingReviewImages(false);
 
@@ -1369,24 +1377,9 @@ export default function WishlistEditorPage() {
                       )}
                     </div>
 
-                    <div className="min-w-0">
+                    <div className="min-w-0 sm:col-start-2 sm:col-end-3">
                       <h3 className="text-base font-semibold text-zinc-900">{item.title}</h3>
                       {displayPrice ? <p className="mt-1 text-base font-semibold text-blue-900">{displayPrice}</p> : null}
-                      {item.description ? (
-                        <p className="mt-1 overflow-hidden text-sm text-zinc-700 [display:-webkit-box] [-webkit-box-orient:vertical] [-webkit-line-clamp:3]">
-                          {item.description}
-                        </p>
-                      ) : null}
-                      {summaryParts.length > 0 ? (
-                        <p className="mt-1 truncate text-xs text-zinc-600" title={summaryParts.join(" • ")}>
-                          {summaryParts.join(" • ")}
-                        </p>
-                      ) : null}
-                      {item.isGroupFunded ? (
-                        <p className="mt-1 text-xs text-zinc-600">
-                          Group-funded target: {item.targetCents !== null ? `$${(item.targetCents / 100).toFixed(2)}` : "Unset"}
-                        </p>
-                      ) : null}
                     </div>
 
                     <div className="flex shrink-0 gap-2 sm:justify-self-end">
@@ -1411,6 +1404,24 @@ export default function WishlistEditorPage() {
                       >
                         Archive
                       </button>
+                    </div>
+
+                    <div className="min-w-0 sm:col-start-2 sm:col-end-4">
+                      {item.description ? (
+                        <p className="mt-1 overflow-hidden text-sm text-zinc-700 [display:-webkit-box] [-webkit-box-orient:vertical] [-webkit-line-clamp:3]">
+                          {item.description}
+                        </p>
+                      ) : null}
+                      {summaryParts.length > 0 ? (
+                        <p className="mt-1 truncate text-xs text-zinc-600" title={summaryParts.join(" • ")}>
+                          {summaryParts.join(" • ")}
+                        </p>
+                      ) : null}
+                      {item.isGroupFunded ? (
+                        <p className="mt-1 text-xs text-zinc-600">
+                          Group-funded target: {item.targetCents !== null ? `$${(item.targetCents / 100).toFixed(2)}` : "Unset"}
+                        </p>
+                      ) : null}
                     </div>
                   </div>
                 </article>

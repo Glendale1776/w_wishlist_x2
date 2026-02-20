@@ -1,6 +1,7 @@
 import { createHash, randomUUID } from "node:crypto";
 
 import { getSupabaseAdminClient, getSupabaseStorageBucket } from "@/app/_lib/supabase-admin";
+import { listWishlistRecords } from "@/app/_lib/wishlist-store";
 
 export type ItemRecord = {
   id: string;
@@ -17,6 +18,22 @@ export type ItemRecord = {
   archivedAt: string | null;
   createdAt: string;
   updatedAt: string;
+};
+
+type ItemRow = {
+  id: string;
+  wishlist_id: string;
+  title: string;
+  description: string | null;
+  url: string | null;
+  price_cents: number | null;
+  image_url: string | null;
+  image_urls: string[] | null;
+  is_group_funded: boolean;
+  target_cents: number | null;
+  archived_at: string | null;
+  created_at: string;
+  updated_at: string;
 };
 
 export type ItemAuditAction = "create" | "update" | "archive" | "reserve" | "unreserve" | "contribute";
@@ -209,6 +226,134 @@ function nowMs() {
   return Date.now();
 }
 
+function itemSelectColumns() {
+  return [
+    "id",
+    "wishlist_id",
+    "title",
+    "description",
+    "url",
+    "price_cents",
+    "image_url",
+    "image_urls",
+    "is_group_funded",
+    "target_cents",
+    "archived_at",
+    "created_at",
+    "updated_at",
+  ].join(",");
+}
+
+function mapItemRowToRecord(row: ItemRow, ownerEmail: string): ItemRecord {
+  const normalizedImages = normalizeImageUrls([...(row.image_urls || []), row.image_url]);
+  return {
+    id: row.id,
+    wishlistId: row.wishlist_id,
+    ownerEmail,
+    title: row.title,
+    description: row.description,
+    url: row.url,
+    priceCents: row.price_cents,
+    imageUrl: normalizedImages[0] || null,
+    imageUrls: normalizedImages,
+    isGroupFunded: row.is_group_funded,
+    targetCents: row.target_cents,
+    archivedAt: row.archived_at,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
+  };
+}
+
+function upsertCachedItem(next: ItemRecord) {
+  const store = getStore();
+  const existingIndex = store.items.findIndex((item) => item.id === next.id);
+  if (existingIndex === -1) {
+    store.items.unshift(next);
+    return;
+  }
+  store.items[existingIndex] = next;
+}
+
+function removeCachedItems(itemIds: Set<string>) {
+  if (itemIds.size === 0) return;
+  const store = getStore();
+  store.items = store.items.filter((item) => !itemIds.has(item.id));
+  store.images = store.images.filter((image) => !itemIds.has(image.itemId));
+  store.uploadTickets = store.uploadTickets.filter((ticket) => !itemIds.has(ticket.itemId));
+  store.previewTickets = store.previewTickets.filter((ticket) => !itemIds.has(ticket.itemId));
+  store.reservations = store.reservations.filter((reservation) => !itemIds.has(reservation.itemId));
+  store.contributions = store.contributions.filter((contribution) => !itemIds.has(contribution.itemId));
+  store.auditEvents = store.auditEvents.filter((event) => !itemIds.has(event.entityId));
+}
+
+async function hasOwnerAccessToWishlist(ownerEmail: string, wishlistId: string): Promise<boolean> {
+  const wishlists = await listWishlistRecords({
+    ownerEmail,
+    search: "",
+    sort: "updated_desc",
+    canonicalHost: process.env.CANONICAL_HOST,
+  });
+  return wishlists.some((wishlist) => wishlist.id === wishlistId);
+}
+
+async function listItemRowsByWishlist(wishlistId: string): Promise<ItemRow[]> {
+  const supabase = getSupabaseAdminClient();
+  const { data, error } = await supabase
+    .from("items")
+    .select(itemSelectColumns())
+    .eq("wishlist_id", wishlistId)
+    .order("updated_at", { ascending: false });
+
+  if (error) throw error;
+  return (data || []) as unknown as ItemRow[];
+}
+
+async function findItemRowById(itemId: string): Promise<ItemRow | null> {
+  const supabase = getSupabaseAdminClient();
+  const { data, error } = await supabase
+    .from("items")
+    .select(itemSelectColumns())
+    .eq("id", itemId)
+    .maybeSingle();
+
+  if (error) {
+    if (error.code === "PGRST116") return null;
+    throw error;
+  }
+
+  if (!data) return null;
+  return data as unknown as ItemRow;
+}
+
+async function findOwnedItem(input: { itemId: string; ownerEmail: string }): Promise<ItemRecord | { error: "NOT_FOUND" | "FORBIDDEN" }> {
+  const row = await findItemRowById(input.itemId);
+  if (!row) {
+    return { error: "NOT_FOUND" as const };
+  }
+
+  const hasAccess = await hasOwnerAccessToWishlist(input.ownerEmail, row.wishlist_id);
+  if (!hasAccess) {
+    return { error: "FORBIDDEN" as const };
+  }
+
+  const record = mapItemRowToRecord(row, input.ownerEmail);
+  upsertCachedItem(record);
+  return record;
+}
+
+async function findDuplicateUrlInWishlist(input: {
+  wishlistId: string;
+  normalizedUrl: string;
+  ignoreItemId?: string;
+}): Promise<boolean> {
+  const rows = await listItemRowsByWishlist(input.wishlistId);
+  return rows.some((row) => {
+    if (row.archived_at) return false;
+    if (input.ignoreItemId && row.id === input.ignoreItemId) return false;
+    return (row.url || "").trim().toLowerCase() === input.normalizedUrl;
+  });
+}
+
 function logAudit(action: ItemAuditEvent["action"], entityId: string, ownerEmail: string, wishlistId: string) {
   const store = getStore();
   store.auditEvents.unshift({
@@ -245,7 +390,8 @@ function parseStoragePath(reference: string): string {
 
 function getItemImageUrls(item: Pick<ItemRecord, "imageUrl" | "imageUrls">): string[] {
   if (Array.isArray(item.imageUrls) && item.imageUrls.length > 0) {
-    return item.imageUrls.filter(Boolean);
+    const normalized = item.imageUrls.filter(Boolean);
+    if (normalized.length > 0) return normalized;
   }
   if (item.imageUrl) return [item.imageUrl];
   return [];
@@ -381,7 +527,7 @@ function hashPayload(payload: unknown): string {
   return createHash("sha256").update(normalized).digest("hex");
 }
 
-export function createItem(input: {
+export async function createItem(input: {
   wishlistId: string;
   ownerEmail: string;
   title: string;
@@ -397,33 +543,39 @@ export function createItem(input: {
   const normalizedUrl = (input.url || "").trim().toLowerCase();
 
   const duplicateUrl = normalizedUrl
-    ? findDuplicateUrl({
+    ? await findDuplicateUrlInWishlist({
         wishlistId: input.wishlistId,
         normalizedUrl,
       })
     : false;
 
   const normalizedImages = normalizeImageUrls([...(input.imageUrls || []), input.imageUrl]);
+  const supabase = getSupabaseAdminClient();
 
-  const item: ItemRecord = {
-    id: randomUUID(),
-    wishlistId: input.wishlistId,
-    ownerEmail: input.ownerEmail,
-    title: input.title,
-    description: input.description,
-    url: input.url,
-    priceCents: input.priceCents,
-    imageUrl: normalizedImages[0] || null,
-    imageUrls: normalizedImages,
-    isGroupFunded: input.isGroupFunded,
-    targetCents: input.targetCents,
-    archivedAt: null,
-    createdAt: now,
-    updatedAt: now,
-  };
+  const { data, error } = await supabase
+    .from("items")
+    .insert({
+      wishlist_id: input.wishlistId,
+      title: input.title,
+      description: input.description,
+      url: input.url,
+      price_cents: input.priceCents,
+      image_url: normalizedImages[0] || null,
+      image_urls: normalizedImages,
+      is_group_funded: input.isGroupFunded,
+      target_cents: input.targetCents,
+      archived_at: null,
+      updated_at: now,
+    })
+    .select(itemSelectColumns())
+    .single();
 
-  const store = getStore();
-  store.items.unshift(item);
+  if (error || !data) {
+    throw error || new Error("Unable to create item.");
+  }
+
+  const item = mapItemRowToRecord(data as unknown as ItemRow, input.ownerEmail);
+  upsertCachedItem(item);
   logAudit("create", item.id, input.ownerEmail, item.wishlistId);
 
   return {
@@ -432,7 +584,7 @@ export function createItem(input: {
   };
 }
 
-export function updateItem(input: {
+export async function updateItem(input: {
   itemId: string;
   ownerEmail: string;
   title: string;
@@ -444,34 +596,50 @@ export function updateItem(input: {
   isGroupFunded: boolean;
   targetCents: number | null;
 }) {
-  const store = getStore();
-  const found = store.items.find((item) => item.id === input.itemId);
-  if (!found) return { error: "NOT_FOUND" as const };
-  if (found.ownerEmail !== input.ownerEmail) return { error: "FORBIDDEN" as const };
+  const owned = await findOwnedItem({
+    itemId: input.itemId,
+    ownerEmail: input.ownerEmail,
+  });
+
+  if ("error" in owned) return { error: owned.error };
 
   const normalizedUrl = (input.url || "").trim().toLowerCase();
   const duplicateUrl = normalizedUrl
-    ? findDuplicateUrl({
-        wishlistId: found.wishlistId,
+    ? await findDuplicateUrlInWishlist({
+        wishlistId: owned.wishlistId,
         normalizedUrl,
-        ignoreItemId: found.id,
+        ignoreItemId: owned.id,
       })
     : false;
 
-  const previousImageUrls = getItemImageUrls(found);
-  const nextImageUrls = normalizeImageUrls(
-    input.imageUrls ? [...input.imageUrls] : [input.imageUrl],
-  );
+  const previousImageUrls = getItemImageUrls(owned);
+  const nextImageUrls = normalizeImageUrls(input.imageUrls ? [...input.imageUrls] : [input.imageUrl]);
+  const nextUpdatedAt = nowIso();
 
-  found.title = input.title;
-  found.description = input.description;
-  found.url = input.url;
-  found.priceCents = input.priceCents;
-  found.imageUrls = nextImageUrls;
-  found.imageUrl = nextImageUrls[0] || null;
-  found.isGroupFunded = input.isGroupFunded;
-  found.targetCents = input.targetCents;
-  found.updatedAt = nowIso();
+  const supabase = getSupabaseAdminClient();
+  const { data, error } = await supabase
+    .from("items")
+    .update({
+      title: input.title,
+      description: input.description,
+      url: input.url,
+      price_cents: input.priceCents,
+      image_url: nextImageUrls[0] || null,
+      image_urls: nextImageUrls,
+      is_group_funded: input.isGroupFunded,
+      target_cents: input.targetCents,
+      updated_at: nextUpdatedAt,
+    })
+    .eq("id", owned.id)
+    .select(itemSelectColumns())
+    .single();
+
+  if (error || !data) {
+    throw error || new Error("Unable to update item.");
+  }
+
+  const item = mapItemRowToRecord(data as unknown as ItemRow, input.ownerEmail);
+  upsertCachedItem(item);
 
   const nextSet = new Set(nextImageUrls.filter(isStorageRef).map((value) => parseStoragePath(value)));
   for (const previousImageUrl of previousImageUrls) {
@@ -482,45 +650,79 @@ export function updateItem(input: {
     }
   }
 
-  logAudit("update", found.id, input.ownerEmail, found.wishlistId);
+  logAudit("update", item.id, input.ownerEmail, item.wishlistId);
 
   return {
-    item: found,
+    item,
     duplicateUrl,
   };
 }
 
-export function archiveItem(input: { itemId: string; ownerEmail: string }) {
-  const store = getStore();
-  const found = store.items.find((item) => item.id === input.itemId);
-  if (!found) return { error: "NOT_FOUND" as const };
-  if (found.ownerEmail !== input.ownerEmail) return { error: "FORBIDDEN" as const };
+export async function archiveItem(input: { itemId: string; ownerEmail: string }) {
+  const owned = await findOwnedItem({
+    itemId: input.itemId,
+    ownerEmail: input.ownerEmail,
+  });
+  if ("error" in owned) return { error: owned.error };
 
-  if (!found.archivedAt) {
-    found.archivedAt = nowIso();
-    found.updatedAt = found.archivedAt;
-    logAudit("archive", found.id, input.ownerEmail, found.wishlistId);
+  if (owned.archivedAt) {
+    return {
+      item: owned,
+    };
   }
 
+  const archivedAt = nowIso();
+  const supabase = getSupabaseAdminClient();
+  const { data, error } = await supabase
+    .from("items")
+    .update({
+      archived_at: archivedAt,
+      updated_at: archivedAt,
+    })
+    .eq("id", owned.id)
+    .select(itemSelectColumns())
+    .single();
+
+  if (error || !data) {
+    throw error || new Error("Unable to archive item.");
+  }
+
+  const item = mapItemRowToRecord(data as unknown as ItemRow, input.ownerEmail);
+  upsertCachedItem(item);
+  logAudit("archive", item.id, input.ownerEmail, item.wishlistId);
+
   return {
-    item: found,
+    item,
   };
 }
 
-export function listItemsForWishlist(input: { wishlistId: string; ownerEmail: string }) {
+export async function listItemsForWishlist(input: { wishlistId: string; ownerEmail: string }) {
+  const hasAccess = await hasOwnerAccessToWishlist(input.ownerEmail, input.wishlistId);
+  if (!hasAccess) return [];
+
+  const rows = await listItemRowsByWishlist(input.wishlistId);
+  const items = rows.map((row) => mapItemRowToRecord(row, input.ownerEmail));
+
   const store = getStore();
-  return store.items
-    .filter((item) => item.wishlistId === input.wishlistId && item.ownerEmail === input.ownerEmail)
-    .sort((a, b) => new Date(b.updatedAt).getTime() - new Date(a.updatedAt).getTime());
+  store.items = store.items.filter(
+    (item) => !(item.wishlistId === input.wishlistId && item.ownerEmail === input.ownerEmail),
+  );
+  store.items.unshift(...items);
+
+  return items;
 }
 
-export function listPublicItemsForWishlist(input: { wishlistId: string }): PublicItemReadModel[] {
-  const store = getStore();
+export async function listPublicItemsForWishlist(input: { wishlistId: string }): Promise<PublicItemReadModel[]> {
+  const rows = await listItemRowsByWishlist(input.wishlistId);
+  const activeItems = rows
+    .filter((row) => !row.archived_at)
+    .map((row) => mapItemRowToRecord(row, ""));
 
-  return store.items
-    .filter((item) => item.wishlistId === input.wishlistId && !item.archivedAt)
-    .sort((a, b) => new Date(b.updatedAt).getTime() - new Date(a.updatedAt).getTime())
-    .map((item) => buildPublicItemReadModel(item));
+  for (const item of activeItems) {
+    upsertCachedItem(item);
+  }
+
+  return activeItems.map((item) => buildPublicItemReadModel(item));
 }
 
 export function reservePublicItem(input: { wishlistId: string; itemId: string; actorEmail: string }) {
@@ -786,7 +988,7 @@ export function consumeActionRateLimit(input: {
   return { ok: true };
 }
 
-export function prepareItemImageUpload(input: {
+export async function prepareItemImageUpload(input: {
   itemId: string;
   ownerEmail: string;
   filename: string;
@@ -796,19 +998,17 @@ export function prepareItemImageUpload(input: {
   allowedMimeTypes: string[];
   ttlSeconds: number;
 }) {
-  const store = getStore();
-  const item = store.items.find((candidate) => candidate.id === input.itemId);
-
-  if (!item) {
-    return { error: "NOT_FOUND" as PrepareImageUploadError };
+  const owned = await findOwnedItem({
+    itemId: input.itemId,
+    ownerEmail: input.ownerEmail,
+  });
+  if ("error" in owned) {
+    return { error: owned.error as PrepareImageUploadError };
   }
-  if (item.ownerEmail !== input.ownerEmail) {
-    return { error: "FORBIDDEN" as PrepareImageUploadError };
-  }
-  if (item.archivedAt) {
+  if (owned.archivedAt) {
     return { error: "ARCHIVED" as PrepareImageUploadError };
   }
-  if (getItemImageUrls(item).length >= ITEM_IMAGE_LIMIT) {
+  if (getItemImageUrls(owned).length >= ITEM_IMAGE_LIMIT) {
     return { error: "IMAGE_LIMIT_REACHED" as PrepareImageUploadError };
   }
 
@@ -828,15 +1028,16 @@ export function prepareItemImageUpload(input: {
 
   const path = buildStoragePath({
     ownerEmail: input.ownerEmail,
-    wishlistId: item.wishlistId,
-    itemId: item.id,
+    wishlistId: owned.wishlistId,
+    itemId: owned.id,
     filename: input.filename,
   });
 
   const uploadToken = randomUUID();
+  const store = getStore();
   store.uploadTickets.push({
     token: uploadToken,
-    itemId: item.id,
+    itemId: owned.id,
     ownerEmail: input.ownerEmail,
     path,
     mimeType: normalizedMime,
@@ -882,20 +1083,19 @@ export async function uploadItemImage(input: {
     return { error: "FILE_TOO_LARGE" as UploadItemImageError };
   }
 
-  const item = store.items.find((candidate) => candidate.id === ticket.itemId);
-  if (!item) {
+  const owned = await findOwnedItem({
+    itemId: ticket.itemId,
+    ownerEmail: input.ownerEmail,
+  });
+  if ("error" in owned) {
     store.uploadTickets.splice(ticketIndex, 1);
-    return { error: "NOT_FOUND" as UploadItemImageError };
+    return { error: owned.error as UploadItemImageError };
   }
-  if (item.ownerEmail !== input.ownerEmail) {
-    store.uploadTickets.splice(ticketIndex, 1);
-    return { error: "FORBIDDEN" as UploadItemImageError };
-  }
-  if (item.archivedAt) {
+  if (owned.archivedAt) {
     store.uploadTickets.splice(ticketIndex, 1);
     return { error: "ARCHIVED" as UploadItemImageError };
   }
-  if (getItemImageUrls(item).length >= ITEM_IMAGE_LIMIT) {
+  if (getItemImageUrls(owned).length >= ITEM_IMAGE_LIMIT) {
     store.uploadTickets.splice(ticketIndex, 1);
     return { error: "IMAGE_LIMIT_REACHED" as UploadItemImageError };
   }
@@ -911,14 +1111,29 @@ export async function uploadItemImage(input: {
     return { error: "STORAGE_UPLOAD_FAILED" as UploadItemImageError };
   }
 
-  const previousImageUrls = getItemImageUrls(item);
-  const previousStoragePath = item.imageUrl && isStorageRef(item.imageUrl) ? parseStoragePath(item.imageUrl) : null;
+  const previousImageUrls = getItemImageUrls(owned);
+  const previousStoragePath = owned.imageUrl && isStorageRef(owned.imageUrl) ? parseStoragePath(owned.imageUrl) : null;
   const nextImageUrls = normalizeImageUrls([...previousImageUrls, `${STORAGE_PREFIX}${ticket.path}`]);
 
   const nextTimestamp = nowIso();
-  item.imageUrls = nextImageUrls;
-  item.imageUrl = nextImageUrls[0] || null;
-  item.updatedAt = nextTimestamp;
+  const { data, error } = await supabase
+    .from("items")
+    .update({
+      image_url: nextImageUrls[0] || null,
+      image_urls: nextImageUrls,
+      updated_at: nextTimestamp,
+    })
+    .eq("id", owned.id)
+    .select(itemSelectColumns())
+    .single();
+
+  if (error || !data) {
+    store.uploadTickets.splice(ticketIndex, 1);
+    return { error: "NOT_FOUND" as UploadItemImageError };
+  }
+
+  const item = mapItemRowToRecord(data as unknown as ItemRow, input.ownerEmail);
+  upsertCachedItem(item);
   logAudit("update", item.id, item.ownerEmail, item.wishlistId);
 
   store.uploadTickets.splice(ticketIndex, 1);
@@ -930,18 +1145,16 @@ export async function uploadItemImage(input: {
   };
 }
 
-export function createItemImagePreview(input: { itemId: string; ownerEmail: string; imageIndex?: number }) {
-  const store = getStore();
-  const item = store.items.find((candidate) => candidate.id === input.itemId);
-
-  if (!item) {
-    return { error: "NOT_FOUND" as CreatePreviewError };
-  }
-  if (item.ownerEmail !== input.ownerEmail) {
-    return { error: "FORBIDDEN" as CreatePreviewError };
+export async function createItemImagePreview(input: { itemId: string; ownerEmail: string; imageIndex?: number }) {
+  const owned = await findOwnedItem({
+    itemId: input.itemId,
+    ownerEmail: input.ownerEmail,
+  });
+  if ("error" in owned) {
+    return { error: owned.error as CreatePreviewError };
   }
 
-  const imageRefs = getItemImageUrls(item);
+  const imageRefs = getItemImageUrls(owned);
   const requestedIndex = Number.isInteger(input.imageIndex) && input.imageIndex !== undefined && input.imageIndex >= 0 ? input.imageIndex : 0;
   const candidateRef = imageRefs[requestedIndex] || null;
   if (!candidateRef) {
@@ -1018,20 +1231,21 @@ export function pruneItemAuditEvents(input: { retentionDays: number }) {
   };
 }
 
-export function deleteItemsForWishlist(input: { wishlistId: string; ownerEmail: string }) {
-  const store = getStore();
-  const itemIds = new Set(
-    store.items
-      .filter((item) => item.wishlistId === input.wishlistId && item.ownerEmail === input.ownerEmail)
-      .map((item) => item.id),
-  );
+export async function deleteItemsForWishlist(input: { wishlistId: string; ownerEmail: string }) {
+  const hasAccess = await hasOwnerAccessToWishlist(input.ownerEmail, input.wishlistId);
+  if (!hasAccess) {
+    return { deletedCount: 0 };
+  }
+
+  const rows = await listItemRowsByWishlist(input.wishlistId);
+  const itemIds = new Set(rows.map((row) => row.id));
 
   if (itemIds.size === 0) {
     return { deletedCount: 0 };
   }
 
-  for (const item of store.items) {
-    if (!itemIds.has(item.id)) continue;
+  for (const row of rows) {
+    const item = mapItemRowToRecord(row, input.ownerEmail);
     for (const imageRef of getItemImageUrls(item)) {
       if (isStorageRef(imageRef)) {
         removeImageByPath(parseStoragePath(imageRef));
@@ -1039,15 +1253,11 @@ export function deleteItemsForWishlist(input: { wishlistId: string; ownerEmail: 
     }
   }
 
-  store.items = store.items.filter((item) => !itemIds.has(item.id));
-  store.images = store.images.filter((image) => !itemIds.has(image.itemId));
-  store.uploadTickets = store.uploadTickets.filter((ticket) => !itemIds.has(ticket.itemId));
-  store.previewTickets = store.previewTickets.filter((ticket) => !itemIds.has(ticket.itemId));
-  store.reservations = store.reservations.filter((reservation) => !itemIds.has(reservation.itemId));
-  store.contributions = store.contributions.filter((contribution) => !itemIds.has(contribution.itemId));
-  store.auditEvents = store.auditEvents.filter(
-    (event) => event.wishlistId !== input.wishlistId && !itemIds.has(event.entityId),
-  );
+  const supabase = getSupabaseAdminClient();
+  const { error } = await supabase.from("items").delete().eq("wishlist_id", input.wishlistId);
+  if (error) throw error;
+
+  removeCachedItems(itemIds);
 
   return { deletedCount: itemIds.size };
 }

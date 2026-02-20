@@ -4,7 +4,7 @@ import { archiveItem } from "@/app/_lib/item-store";
 
 const EMAIL_REGEX = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 
-type ApiErrorCode = "AUTH_REQUIRED" | "FORBIDDEN" | "NOT_FOUND";
+type ApiErrorCode = "AUTH_REQUIRED" | "FORBIDDEN" | "NOT_FOUND" | "INTERNAL_ERROR";
 
 function errorResponse(status: number, code: ApiErrorCode, message: string) {
   return NextResponse.json(
@@ -29,7 +29,13 @@ export async function POST(request: NextRequest, context: { params: Promise<{ id
   }
 
   const { id } = await context.params;
-  const result = archiveItem({ itemId: id, ownerEmail });
+
+  let result: Awaited<ReturnType<typeof archiveItem>>;
+  try {
+    result = await archiveItem({ itemId: id, ownerEmail });
+  } catch {
+    return errorResponse(500, "INTERNAL_ERROR", "Unable to archive item right now.");
+  }
 
   if ("error" in result) {
     if (result.error === "NOT_FOUND") {

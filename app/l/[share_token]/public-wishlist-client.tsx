@@ -565,63 +565,94 @@ export default function PublicWishlistClient({ shareToken }: { shareToken: strin
         </section>
       ) : model ? (
         <>
-          <header className="rounded-2xl border border-zinc-200 bg-white p-5 shadow-sm sm:p-6">
-            <div className="flex flex-wrap items-start justify-between gap-3">
-              <div>
-                <h1 className="text-2xl font-semibold tracking-tight text-zinc-900">{model.wishlist.title}</h1>
-                <p className="mt-1 text-sm text-zinc-600">
-                  Occasion: {formatDate(model.wishlist.occasionDate)} • {model.wishlist.itemCount} active items
-                </p>
-                {model.wishlist.occasionNote ? (
-                  <p className="mt-2 text-sm text-zinc-700">{model.wishlist.occasionNote}</p>
-                ) : null}
-              </div>
-              <div className="flex flex-wrap gap-2">
-                <Link className="rounded-md border border-zinc-300 px-3 py-2 text-sm font-medium text-zinc-800" href="/me/activity">
-                  My activity
-                </Link>
-                <Link className="rounded-md border border-zinc-300 px-3 py-2 text-sm font-medium text-zinc-800" href="/login">
-                  Sign in
-                </Link>
+          <header className="px-1 py-1 sm:px-2">
+            <div className="overflow-hidden rounded-2xl bg-gradient-to-r from-sky-50 via-white to-rose-50 px-5 py-5 sm:px-6">
+              <div className="flex flex-wrap items-start justify-between gap-3">
+                <div>
+                  <h1 className="text-2xl font-semibold tracking-tight text-zinc-900">{model.wishlist.title}</h1>
+                  <div className="mt-2 flex flex-wrap items-center gap-2 text-xs">
+                    <span className="rounded-full bg-white/90 px-2.5 py-1 font-medium text-zinc-700 ring-1 ring-sky-100">
+                      Occasion: {formatDate(model.wishlist.occasionDate)}
+                    </span>
+                    <span className="rounded-full bg-white/90 px-2.5 py-1 font-medium text-zinc-700 ring-1 ring-sky-100">
+                      {model.wishlist.itemCount} active items
+                    </span>
+                  </div>
+                  {model.wishlist.occasionNote ? (
+                    <p className="mt-3 max-w-3xl text-sm text-zinc-700">{model.wishlist.occasionNote}</p>
+                  ) : null}
+                </div>
+                <div className="flex flex-wrap gap-2">
+                  <Link
+                    className="rounded-full border border-sky-200 bg-white/90 px-4 py-2 text-sm font-medium text-sky-900 transition hover:bg-white"
+                    href="/me/activity"
+                  >
+                    My activity
+                  </Link>
+                  <Link
+                    className="rounded-full border border-sky-200 bg-white/90 px-4 py-2 text-sm font-medium text-sky-900 transition hover:bg-white"
+                    href="/login"
+                  >
+                    Sign in
+                  </Link>
+                </div>
               </div>
             </div>
 
-            <div className="mt-5 grid gap-3 sm:grid-cols-3">
-              <label className="text-sm">
-                <span className="mb-1 block font-medium text-zinc-800">Search</span>
-                <input
-                  className="w-full rounded-md border border-zinc-300 px-3 py-2 text-sm outline-none focus:border-zinc-500"
-                  onChange={(event) => setSearch(event.target.value)}
-                  placeholder="Search items"
-                  value={search}
-                />
-              </label>
-
-              <label className="text-sm">
-                <span className="mb-1 block font-medium text-zinc-800">Availability</span>
-                <select
-                  className="w-full rounded-md border border-zinc-300 px-3 py-2 text-sm outline-none focus:border-zinc-500"
-                  onChange={(event) => setAvailabilityFilter(event.target.value as "all" | "available" | "reserved")}
-                  value={availabilityFilter}
+            <div className="mt-4 rounded-2xl bg-white/85 p-4 ring-1 ring-zinc-200/80 backdrop-blur-sm">
+              <div className="mb-3 flex items-center justify-between">
+                <p className="text-xs font-semibold uppercase tracking-[0.12em] text-zinc-500">Filter items</p>
+                <button
+                  className="text-xs font-medium text-zinc-500 underline underline-offset-2 transition hover:text-zinc-700 disabled:no-underline disabled:opacity-40"
+                  disabled={!search.trim() && availabilityFilter === "all" && fundingFilter === "all"}
+                  onClick={() => {
+                    setSearch("");
+                    setAvailabilityFilter("all");
+                    setFundingFilter("all");
+                  }}
+                  type="button"
                 >
-                  <option value="all">All</option>
-                  <option value="available">Available</option>
-                  <option value="reserved">Reserved</option>
-                </select>
-              </label>
+                  Reset
+                </button>
+              </div>
 
-              <label className="text-sm">
-                <span className="mb-1 block font-medium text-zinc-800">Funding</span>
-                <select
-                  className="w-full rounded-md border border-zinc-300 px-3 py-2 text-sm outline-none focus:border-zinc-500"
-                  onChange={(event) => setFundingFilter(event.target.value as "all" | "group" | "single")}
-                  value={fundingFilter}
-                >
-                  <option value="all">All items</option>
-                  <option value="group">Group funded</option>
-                  <option value="single">Single gift</option>
-                </select>
-              </label>
+              <div className="grid gap-3 lg:grid-cols-[minmax(0,1.4fr)_minmax(0,1fr)_minmax(0,1fr)]">
+                <label className="text-sm">
+                  <span className="mb-1 block text-xs font-semibold uppercase tracking-wide text-zinc-500">Search</span>
+                  <input
+                    className="w-full rounded-xl border border-zinc-300 bg-white px-3 py-2 text-sm outline-none transition focus:border-sky-400 focus:ring-2 focus:ring-sky-100"
+                    onChange={(event) => setSearch(event.target.value)}
+                    placeholder="Type item name or keyword"
+                    value={search}
+                  />
+                </label>
+
+                <label className="text-sm">
+                  <span className="mb-1 block text-xs font-semibold uppercase tracking-wide text-zinc-500">Availability</span>
+                  <select
+                    className="w-full rounded-xl border border-zinc-300 bg-white px-3 py-2 text-sm outline-none transition focus:border-sky-400 focus:ring-2 focus:ring-sky-100"
+                    onChange={(event) => setAvailabilityFilter(event.target.value as "all" | "available" | "reserved")}
+                    value={availabilityFilter}
+                  >
+                    <option value="all">All</option>
+                    <option value="available">Available</option>
+                    <option value="reserved">Reserved</option>
+                  </select>
+                </label>
+
+                <label className="text-sm">
+                  <span className="mb-1 block text-xs font-semibold uppercase tracking-wide text-zinc-500">Funding</span>
+                  <select
+                    className="w-full rounded-xl border border-zinc-300 bg-white px-3 py-2 text-sm outline-none transition focus:border-sky-400 focus:ring-2 focus:ring-sky-100"
+                    onChange={(event) => setFundingFilter(event.target.value as "all" | "group" | "single")}
+                    value={fundingFilter}
+                  >
+                    <option value="all">All items</option>
+                    <option value="group">Group funded</option>
+                    <option value="single">Single gift</option>
+                  </select>
+                </label>
+              </div>
             </div>
           </header>
 

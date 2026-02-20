@@ -416,6 +416,67 @@ export async function listWishlistRecords(input: {
   }));
 }
 
+export type UpdateWishlistError = "NOT_FOUND" | "FORBIDDEN";
+
+export async function updateWishlistRecord(input: {
+  wishlistId: string;
+  ownerEmail: string;
+  ownerId?: string;
+  title: string;
+  occasionDate: string | null;
+  occasionNote: string | null;
+  canonicalHost?: string;
+}) {
+  const ownerEmail = normalizeEmail(input.ownerEmail);
+  const ownerId = input.ownerId?.trim() || (await resolveOwnerUserId(ownerEmail));
+  if (!ownerId) {
+    return { error: "FORBIDDEN" as UpdateWishlistError };
+  }
+
+  const found = await findWishlistById(input.wishlistId);
+  if (!found) {
+    return { error: "NOT_FOUND" as UpdateWishlistError };
+  }
+
+  if (found.owner_id !== ownerId) {
+    return { error: "FORBIDDEN" as UpdateWishlistError };
+  }
+
+  const canonicalHost = normalizeCanonicalHost(input.canonicalHost);
+  const timestamp = nowIso();
+  const supabase = getSupabaseAdminClient();
+  const { data, error } = await supabase
+    .from("wishlists")
+    .update({
+      title: input.title,
+      occasion_date: input.occasionDate,
+      occasion_note: input.occasionNote,
+      updated_at: timestamp,
+    })
+    .eq("id", found.id)
+    .eq("owner_id", ownerId)
+    .select(wishlistSelectColumns())
+    .single();
+
+  if (error || !data) {
+    throw error || new Error("Unable to update wishlist.");
+  }
+
+  const row = data as unknown as WishlistRow;
+  const store = getStore();
+  const wishlist = mapWishlistRowToRecord(row, ownerEmail);
+  const shareUrlPreview = buildPublicShareUrl(
+    canonicalHost,
+    store.shareTokensByHash[row.share_token_hash] || row.share_token_hint,
+  );
+
+  return {
+    ok: true as const,
+    wishlist,
+    shareUrlPreview,
+  };
+}
+
 export type ResolvePublicWishlistError = "NOT_FOUND" | "DISABLED";
 
 export async function resolvePublicWishlistByToken(

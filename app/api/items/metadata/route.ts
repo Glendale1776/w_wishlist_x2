@@ -74,6 +74,90 @@ function extractAll(content: string, pattern: RegExp): string[] {
   return Array.from(content.matchAll(pattern)).map((match) => (match[1] || "").trim()).filter(Boolean);
 }
 
+function cleanJsonLd(raw: string): string {
+  return raw
+    .trim()
+    .replace(/^<!--/, "")
+    .replace(/-->$/, "")
+    .replace(/^\s*\/\/<!\[CDATA\[/, "")
+    .replace(/\/\/\]\]>\s*$/, "")
+    .trim();
+}
+
+type JsonLdPriceCandidate = {
+  raw: string;
+  path: string;
+};
+
+function collectJsonLdPriceCandidates(value: unknown, path: string, out: JsonLdPriceCandidate[]) {
+  if (Array.isArray(value)) {
+    value.forEach((entry, index) => {
+      collectJsonLdPriceCandidates(entry, `${path}[${index}]`, out);
+    });
+    return;
+  }
+
+  if (!value || typeof value !== "object") return;
+
+  for (const [key, entry] of Object.entries(value as Record<string, unknown>)) {
+    const keyLower = key.toLowerCase();
+    const nextPath = path ? `${path}.${keyLower}` : keyLower;
+
+    if (
+      (keyLower === "price" || keyLower === "lowprice" || keyLower === "highprice") &&
+      (typeof entry === "string" || typeof entry === "number")
+    ) {
+      out.push({ raw: String(entry), path: nextPath });
+    }
+
+    collectJsonLdPriceCandidates(entry, nextPath, out);
+  }
+}
+
+function scoreJsonLdPricePath(path: string): number {
+  const normalizedPath = path.toLowerCase();
+  let score = 0;
+  if (normalizedPath.includes("offers.price")) score += 6;
+  if (normalizedPath.endsWith(".price")) score += 3;
+  if (normalizedPath.includes("lowprice")) score += 2;
+  if (normalizedPath.includes("highprice")) score += 1;
+  if (normalizedPath.includes("shipping")) score -= 5;
+  if (normalizedPath.includes("listprice")) score -= 1;
+  return score;
+}
+
+function extractPriceCentsFromJsonLd(html: string): number | null {
+  const blocks = extractAll(
+    html,
+    /<script[^>]+type=["']application\/ld\+json["'][^>]*>([\s\S]*?)<\/script>/gi,
+  );
+
+  let best: { cents: number; score: number } | null = null;
+
+  for (const block of blocks) {
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(cleanJsonLd(block));
+    } catch {
+      continue;
+    }
+
+    const candidates: JsonLdPriceCandidate[] = [];
+    collectJsonLdPriceCandidates(parsed, "", candidates);
+
+    for (const candidate of candidates) {
+      const cents = parsePriceToCents(candidate.raw);
+      if (cents === null || cents < 50 || cents > 50_000_000) continue;
+      const score = scoreJsonLdPricePath(candidate.path);
+      if (!best || score > best.score) {
+        best = { cents, score };
+      }
+    }
+  }
+
+  return best?.cents ?? null;
+}
+
 function toAbsoluteHttpUrl(value: string, baseUrl: URL): string | null {
   try {
     const candidate = new URL(value, baseUrl.toString());
@@ -125,8 +209,48 @@ function htmlToText(html: string): string {
 
 function parsePriceToCents(raw: string | null): number | null {
   if (!raw) return null;
-  const cleaned = raw.replace(/[^\d.,]/g, "").replace(/,/g, "");
-  const price = Number(cleaned);
+  const compact = raw.replace(/\s+/g, "").replace(/[^\d.,]/g, "");
+  if (!compact) return null;
+
+  const lastDot = compact.lastIndexOf(".");
+  const lastComma = compact.lastIndexOf(",");
+  let normalized = compact;
+
+  if (lastDot >= 0 && lastComma >= 0) {
+    const decimalIndex = Math.max(lastDot, lastComma);
+    const intPart = compact.slice(0, decimalIndex).replace(/[.,]/g, "");
+    const fracPart = compact.slice(decimalIndex + 1).replace(/[.,]/g, "");
+    if (!intPart || fracPart.length === 0 || fracPart.length > 2) {
+      normalized = compact.replace(/[.,]/g, "");
+    } else {
+      normalized = `${intPart}.${fracPart}`;
+    }
+  } else if (lastComma >= 0) {
+    const intPart = compact.slice(0, lastComma).replace(/[.,]/g, "");
+    const fracPart = compact.slice(lastComma + 1).replace(/[.,]/g, "");
+    if (intPart && fracPart.length === 2) {
+      normalized = `${intPart}.${fracPart}`;
+    } else {
+      normalized = compact.replace(/,/g, "");
+    }
+  } else if (lastDot >= 0) {
+    const intPart = compact.slice(0, lastDot).replace(/[.,]/g, "");
+    const fracPart = compact.slice(lastDot + 1).replace(/[.,]/g, "");
+    if (intPart && fracPart.length === 2) {
+      normalized = `${intPart}.${fracPart}`;
+    } else if (fracPart.length === 3) {
+      normalized = `${intPart}${fracPart}`;
+    } else if (fracPart.length === 0) {
+      normalized = intPart;
+    } else {
+      normalized = `${intPart}.${fracPart}`;
+    }
+  } else {
+    normalized = compact;
+  }
+
+  if (!/^\d+(?:\.\d{1,2})?$/.test(normalized)) return null;
+  const price = Number(normalized);
   if (!Number.isFinite(price) || price < 0) return null;
   return Math.round(price * 100);
 }
@@ -135,6 +259,27 @@ function parseNumberPriceToCents(raw: number | null): number | null {
   if (raw === null) return null;
   if (!Number.isFinite(raw) || raw < 0) return null;
   return Math.round(raw * 100);
+}
+
+function isLikelyRoundedFromHint(aiPriceCents: number, hintPriceCents: number): boolean {
+  if (aiPriceCents % 100 !== 0) return false;
+  if (hintPriceCents % 100 === 0) return false;
+  return Math.trunc(aiPriceCents / 100) === Math.trunc(hintPriceCents / 100);
+}
+
+function shouldTrustAiPrice(aiPriceCents: number | null, baselinePriceCents: number | null): boolean {
+  if (aiPriceCents === null) return false;
+  if (baselinePriceCents === null) return true;
+
+  if (isLikelyRoundedFromHint(aiPriceCents, baselinePriceCents)) {
+    return false;
+  }
+
+  const delta = Math.abs(aiPriceCents - baselinePriceCents);
+  if (delta <= 49) return true;
+
+  const ratio = aiPriceCents / baselinePriceCents;
+  return ratio >= 0.9 && ratio <= 1.1;
 }
 
 function cleanTitle(value: string | null): string | null {
@@ -213,13 +358,64 @@ function titleFromPathSlug(parsed: URL): string | null {
 }
 
 function extractPriceCentsFromText(text: string): number | null {
-  const matches = Array.from(text.matchAll(/(?:US?\$|\$)\s*([0-9]{1,4}(?:,[0-9]{3})*(?:\.[0-9]{2})?)/g));
-  for (const match of matches) {
-    const raw = match[1];
-    const cents = parsePriceToCents(raw);
-    if (cents !== null) return cents;
+  const candidates: Array<{ cents: number; score: number; index: number }> = [];
+  const frequency = new Map<number, number>();
+  const negativeContext = /\b(delivery|shipping|tax|coupon|discount|save|off|points|review|rating|month|monthly|installment|pack)\b/i;
+  const positiveContext = /\b(price|our price|buy now|add to cart|subtotal|in stock|sale)\b/i;
+
+  const matches = [
+    ...Array.from(
+      text.matchAll(
+        /(US?\$|\$|€|£|USD|EUR|GBP|CAD|AUD|JPY)\s*([0-9]{1,6}(?:[.,][0-9]{3})*(?:[.,][0-9]{2})?)/gi,
+      ),
+    ).map((match) => ({ match, rawAmount: match[2] })),
+    ...Array.from(
+      text.matchAll(
+        /([0-9]{1,6}(?:[.,][0-9]{3})*(?:[.,][0-9]{2})?)\s*(USD|EUR|GBP|CAD|AUD|JPY|€|£)/gi,
+      ),
+    ).map((match) => ({ match, rawAmount: match[1] })),
+  ];
+
+  for (const { match, rawAmount } of matches) {
+    const cents = parsePriceToCents(rawAmount);
+    if (cents === null || cents < 50 || cents > 50_000_000) continue;
+
+    const index = typeof match.index === "number" ? match.index : 0;
+    const start = Math.max(0, index - 70);
+    const end = Math.min(text.length, index + 120);
+    const context = text.slice(start, end);
+
+    let score = 0;
+    if (positiveContext.test(context)) score += 4;
+    if (negativeContext.test(context)) score -= 5;
+    if (cents % 100 !== 0) score += 1;
+    if (cents >= 500 && cents <= 2_000_000) score += 1;
+
+    frequency.set(cents, (frequency.get(cents) || 0) + 1);
+    candidates.push({ cents, score, index });
   }
-  return null;
+
+  let best: { cents: number; score: number; index: number } | null = null;
+  for (const candidate of candidates) {
+    const occurrenceBonus = (frequency.get(candidate.cents) || 1) - 1;
+    const finalScore = candidate.score + occurrenceBonus * 3;
+
+    if (!best) {
+      best = { ...candidate, score: finalScore };
+      continue;
+    }
+
+    if (finalScore > best.score) {
+      best = { ...candidate, score: finalScore };
+      continue;
+    }
+
+    if (finalScore === best.score && candidate.index < best.index) {
+      best = { ...candidate, score: finalScore };
+    }
+  }
+
+  return best?.cents ?? null;
 }
 
 function isLikelyDecorativeImageUrl(imageUrl: string): boolean {
@@ -358,6 +554,7 @@ function fallbackMetadata(html: string, pageUrl: URL) {
     extractMeta(html, /<meta\s+property=["']product:price:amount["']\s+content=["']([^"']+)["']/i) ||
     extractMeta(html, /<meta\s+itemprop=["']price["']\s+content=["']([^"']+)["']/i) ||
     null;
+  const priceCentsFromJsonLd = extractPriceCentsFromJsonLd(html);
 
   const imageCandidates = [
     ...extractAll(html, /<meta\s+property=["']og:image["']\s+content=["']([^"']+)["']/gi),
@@ -373,7 +570,7 @@ function fallbackMetadata(html: string, pageUrl: URL) {
   return {
     title: sanitizeMarketplaceTitle(title, pageUrl),
     description: cleanedDescription,
-    priceCents: parsePriceToCents(priceFromMeta),
+    priceCents: parsePriceToCents(priceFromMeta) ?? priceCentsFromJsonLd,
     imageUrls: rankCandidateImageUrls(normalizeImageUrls(imageCandidates, pageUrl), pageUrl),
   };
 }
@@ -475,7 +672,7 @@ async function inferMetadataWithOpenAi(input: {
           {
             role: "system",
             content:
-              "Extract product metadata from the provided webpage data. Return null for unknown fields. Do not invent facts. For imageUrls, prefer actual product photos from candidateImageUrls.",
+              "Extract product metadata from the provided webpage data. Return null for unknown fields. Do not invent facts. For imageUrls, prefer actual product photos from candidateImageUrls. For price, return the exact product price with cents as shown on the page; never round (19.99 must stay 19.99). Ignore shipping, coupons, monthly payments, and accessory prices.",
           },
           {
             role: "user",
@@ -669,13 +866,12 @@ export async function POST(request: NextRequest) {
     const rawDescription = aiMetadata?.description || descriptionHint;
     const description = looksLikeMarketplaceOnlyText(rawDescription, parsed) ? null : cleanDescription(rawDescription);
 
+    const textExtractedPriceCents = extractPriceCentsFromText(sourceText);
+    const baselinePriceCents = priceHintCents ?? textExtractedPriceCents;
     const aiPriceCents = parseNumberPriceToCents(aiMetadata?.price ?? null);
-    const trustworthyAiPrice =
-      aiPriceCents !== null &&
-      (priceHintCents === null || (aiPriceCents >= Math.round(priceHintCents * 0.5) && aiPriceCents <= Math.round(priceHintCents * 2)));
-    const priceCents = trustworthyAiPrice
+    const priceCents = shouldTrustAiPrice(aiPriceCents, baselinePriceCents)
       ? aiPriceCents
-      : priceHintCents ?? aiPriceCents ?? extractPriceCentsFromText(sourceText);
+      : baselinePriceCents ?? aiPriceCents;
 
     return NextResponse.json({
       ok: true as const,

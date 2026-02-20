@@ -36,6 +36,12 @@ function parsePositiveInt(raw: string | undefined, fallback: number) {
 export async function POST(request: NextRequest, context: { params: Promise<{ id: string }> }) {
   const owner = await authenticateOwnerRequest(request);
   if (!owner.ok) {
+    if (owner.code === "AUTH_TIMEOUT") {
+      return errorResponse(503, "INTERNAL_ERROR", "Auth verification timed out. Please retry.");
+    }
+    if (owner.code === "AUTH_MISMATCH") {
+      return errorResponse(403, "FORBIDDEN", "Request owner does not match the signed-in account.");
+    }
     return errorResponse(401, "AUTH_REQUIRED", "Sign in is required to rotate the share link.");
   }
 

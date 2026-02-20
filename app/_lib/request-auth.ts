@@ -5,8 +5,9 @@ import type { NextRequest } from "next/server";
 import { getSupabaseAdminClient } from "@/app/_lib/supabase-admin";
 
 const EMAIL_REGEX = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+const DEFAULT_AUTH_TIMEOUT_MS = 8_000;
 
-type AuthFailureCode = "AUTH_REQUIRED" | "AUTH_INVALID" | "AUTH_MISMATCH";
+type AuthFailureCode = "AUTH_REQUIRED" | "AUTH_INVALID" | "AUTH_MISMATCH" | "AUTH_TIMEOUT";
 
 export type OwnerRequestAuthResult =
   | {
@@ -33,6 +34,34 @@ function getBearerToken(request: NextRequest): string | null {
   return safeToken || null;
 }
 
+class TimeoutError extends Error {
+  constructor() {
+    super("AUTH_TIMEOUT");
+    this.name = "TimeoutError";
+  }
+}
+
+function parseTimeoutMs(raw: string | undefined, fallback: number) {
+  const parsed = Number(raw);
+  if (!Number.isFinite(parsed) || parsed <= 0) return fallback;
+  return Math.floor(parsed);
+}
+
+async function withTimeout<T>(promise: Promise<T>, timeoutMs: number): Promise<T> {
+  let timeoutId: ReturnType<typeof setTimeout> | undefined;
+  const timeoutPromise = new Promise<never>((_, reject) => {
+    timeoutId = setTimeout(() => {
+      reject(new TimeoutError());
+    }, timeoutMs);
+  });
+
+  try {
+    return await Promise.race([promise, timeoutPromise]);
+  } finally {
+    if (timeoutId) clearTimeout(timeoutId);
+  }
+}
+
 export async function authenticateOwnerRequest(request: NextRequest): Promise<OwnerRequestAuthResult> {
   const token = getBearerToken(request);
   if (!token) {
@@ -40,7 +69,22 @@ export async function authenticateOwnerRequest(request: NextRequest): Promise<Ow
   }
 
   const supabase = getSupabaseAdminClient();
-  const { data, error } = await supabase.auth.getUser(token);
+  let data: Awaited<ReturnType<typeof supabase.auth.getUser>>["data"];
+  let error: Awaited<ReturnType<typeof supabase.auth.getUser>>["error"];
+  try {
+    const result = await withTimeout(
+      supabase.auth.getUser(token),
+      parseTimeoutMs(process.env.AUTH_TIMEOUT_MS, DEFAULT_AUTH_TIMEOUT_MS),
+    );
+    data = result.data;
+    error = result.error;
+  } catch (caught) {
+    if (caught instanceof TimeoutError) {
+      return { ok: false, code: "AUTH_TIMEOUT" };
+    }
+    return { ok: false, code: "AUTH_INVALID" };
+  }
+
   if (error || !data.user) {
     return { ok: false, code: "AUTH_INVALID" };
   }

@@ -12,12 +12,25 @@ import {
   WishlistListResponse,
   WishlistPreview,
   WishlistSort,
+  WishlistUpdateResponse,
 } from "@/app/_lib/wishlist-shell";
 
 type ToastState = {
   message: string;
   kind: "success" | "error";
 } | null;
+
+type WishlistEditDraft = {
+  title: string;
+  occasionDate: string;
+  occasionNote: string;
+};
+
+type WishlistEditFieldErrors = Partial<Record<keyof WishlistEditDraft, string>>;
+
+const TITLE_MAX = 80;
+const NOTE_MAX = 200;
+const DATE_REGEX = /^\d{4}-\d{2}-\d{2}$/;
 
 function WishlistsContent() {
   const router = useRouter();
@@ -28,6 +41,15 @@ function WishlistsContent() {
   const [loadError, setLoadError] = useState<string | null>(null);
   const [list, setList] = useState<WishlistPreview[]>([]);
   const [deletingWishlistId, setDeletingWishlistId] = useState<string | null>(null);
+  const [editingWishlistId, setEditingWishlistId] = useState<string | null>(null);
+  const [editDraft, setEditDraft] = useState<WishlistEditDraft>({
+    title: "",
+    occasionDate: "",
+    occasionNote: "",
+  });
+  const [editFieldErrors, setEditFieldErrors] = useState<WishlistEditFieldErrors>({});
+  const [editError, setEditError] = useState<string | null>(null);
+  const [savingWishlistId, setSavingWishlistId] = useState<string | null>(null);
   const [isFiltersOpen, setIsFiltersOpen] = useState(false);
   const filtersRef = useRef<HTMLDivElement | null>(null);
 
@@ -153,6 +175,46 @@ function WishlistsContent() {
     setQueryValues({ search: "", sort: "updated_desc" });
   }
 
+  function validateWishlistDraft(draft: WishlistEditDraft): WishlistEditFieldErrors {
+    const errors: WishlistEditFieldErrors = {};
+    const title = draft.title.trim();
+    const occasionDate = draft.occasionDate.trim();
+    const occasionNote = draft.occasionNote.trim();
+
+    if (!title) errors.title = "Wishlist title is required.";
+    if (title.length > TITLE_MAX) errors.title = `Title must be ${TITLE_MAX} characters or less.`;
+    if (occasionDate && !DATE_REGEX.test(occasionDate)) {
+      errors.occasionDate = "Occasion date must use YYYY-MM-DD.";
+    }
+    if (occasionNote.length > NOTE_MAX) {
+      errors.occasionNote = `Occasion note must be ${NOTE_MAX} characters or less.`;
+    }
+
+    return errors;
+  }
+
+  function startEditingWishlist(item: WishlistPreview) {
+    setEditingWishlistId(item.id);
+    setEditFieldErrors({});
+    setEditError(null);
+    setEditDraft({
+      title: item.title,
+      occasionDate: item.occasionDate || "",
+      occasionNote: item.occasionNote || "",
+    });
+  }
+
+  function cancelEditingWishlist() {
+    setEditingWishlistId(null);
+    setEditFieldErrors({});
+    setEditError(null);
+    setEditDraft({
+      title: "",
+      occasionDate: "",
+      occasionNote: "",
+    });
+  }
+
   async function copyShareLink(shareUrl: string) {
     try {
       await navigator.clipboard.writeText(shareUrl);
@@ -211,7 +273,71 @@ function WishlistsContent() {
     }
 
     setList((current) => current.filter((entry) => entry.id !== payload.deletedWishlistId));
+    if (editingWishlistId === payload.deletedWishlistId) {
+      cancelEditingWishlist();
+    }
     setToast({ kind: "success", message: "Wishlist deleted." });
+  }
+
+  async function saveWishlistDetails(item: WishlistPreview) {
+    const fieldErrors = validateWishlistDraft(editDraft);
+    setEditFieldErrors(fieldErrors);
+    setEditError(null);
+    if (Object.keys(fieldErrors).length > 0) return;
+
+    const ownerHeaders = await getAuthenticatedOwnerHeaders();
+    if (!ownerHeaders) {
+      persistReturnTo("/wishlists");
+      router.replace("/login?returnTo=/wishlists");
+      return;
+    }
+
+    setSavingWishlistId(item.id);
+
+    let response: Response;
+    try {
+      response = await fetch(`/api/wishlists/${encodeURIComponent(item.id)}`, {
+        method: "PATCH",
+        headers: {
+          "content-type": "application/json",
+          ...ownerHeaders,
+        },
+        body: JSON.stringify({
+          title: editDraft.title.trim(),
+          occasionDate: editDraft.occasionDate.trim() || null,
+          occasionNote: editDraft.occasionNote.trim() || null,
+        }),
+      });
+    } catch {
+      setSavingWishlistId(null);
+      setEditError("Unable to save wishlist details right now. Please retry.");
+      return;
+    }
+
+    const payload = (await response.json()) as WishlistUpdateResponse | ApiErrorResponse;
+    setSavingWishlistId(null);
+
+    if (!response.ok || !payload.ok) {
+      if (response.status === 401) {
+        persistReturnTo("/wishlists");
+        router.replace("/login?returnTo=/wishlists");
+        return;
+      }
+
+      if (!payload.ok && payload.error.fieldErrors) {
+        setEditFieldErrors((current) => ({ ...current, ...payload.error.fieldErrors }));
+      }
+      const message =
+        payload && !payload.ok ? payload.error.message : "Unable to save wishlist details right now.";
+      setEditError(message);
+      return;
+    }
+
+    setList((current) =>
+      current.map((entry) => (entry.id === payload.wishlist.id ? payload.wishlist : entry)),
+    );
+    cancelEditingWishlist();
+    setToast({ kind: "success", message: "Wishlist details updated." });
   }
 
   return (
@@ -332,40 +458,119 @@ function WishlistsContent() {
             </Link>
           </div>
         ) : (
-          list.map((item) => (
-            <article className="border-b border-zinc-300/80 px-2 pb-5 pt-2 last:border-b-0 sm:px-3" key={item.id}>
-              <div className="flex flex-wrap items-start justify-between gap-3">
-                <div>
-                  <h2 className="text-base font-semibold text-zinc-900">{item.title}</h2>
-                  <p className="mt-1 text-xs text-zinc-600">
-                    {item.occasionDate ? `Occasion date: ${item.occasionDate}` : "No occasion date"}
-                  </p>
+          list.map((item) => {
+            const isEditing = editingWishlistId === item.id;
+            return (
+              <article className="border-b border-zinc-300/80 px-2 pb-5 pt-2 last:border-b-0 sm:px-3" key={item.id}>
+                <div className="flex flex-wrap items-start justify-between gap-3">
+                  <div>
+                    <h2 className="text-base font-semibold text-zinc-900">{item.title}</h2>
+                    <p className="mt-1 text-xs text-zinc-600">
+                      {item.occasionDate ? `Occasion date: ${item.occasionDate}` : "No occasion date"}
+                    </p>
+                    {item.occasionNote ? <p className="mt-2 text-sm text-zinc-700">{item.occasionNote}</p> : null}
+                  </div>
+                  <p className="text-xs text-zinc-500">Updated {new Date(item.updatedAt).toLocaleDateString()}</p>
                 </div>
-                <p className="text-xs text-zinc-500">Updated {new Date(item.updatedAt).toLocaleDateString()}</p>
-              </div>
 
-              <div className="mt-4 flex flex-wrap items-center gap-2">
-                <Link className="btn-notch" href={`/wishlists/${item.id}`}>
-                  Open editor
-                </Link>
-                <button
-                  className="btn-notch btn-notch--ink"
-                  onClick={() => copyShareLink(item.shareUrlPreview)}
-                  type="button"
-                >
-                  Copy share link
-                </button>
-                <button
-                  className="btn-notch btn-notch--rose"
-                  disabled={deletingWishlistId === item.id}
-                  onClick={() => void deleteWishlist(item)}
-                  type="button"
-                >
-                  {deletingWishlistId === item.id ? "Deleting..." : "Delete wishlist"}
-                </button>
-              </div>
-            </article>
-          ))
+                {isEditing ? (
+                  <div className="mt-4 max-w-2xl space-y-3 rounded-xl border border-zinc-200 bg-zinc-50 p-4">
+                    <div>
+                      <label className="mb-1 block text-xs font-medium text-zinc-700" htmlFor={`wishlist-title-${item.id}`}>
+                        Wishlist name
+                      </label>
+                      <input
+                        className="w-full rounded-md border border-zinc-300 px-3 py-2 text-sm outline-none focus:border-zinc-500"
+                        id={`wishlist-title-${item.id}`}
+                        maxLength={TITLE_MAX}
+                        onChange={(event) =>
+                          setEditDraft((current) => ({ ...current, title: event.target.value }))
+                        }
+                        value={editDraft.title}
+                      />
+                      {editFieldErrors.title ? <p className="mt-1 text-xs text-rose-700">{editFieldErrors.title}</p> : null}
+                    </div>
+
+                    <div>
+                      <label className="mb-1 block text-xs font-medium text-zinc-700" htmlFor={`wishlist-date-${item.id}`}>
+                        Occasion date
+                      </label>
+                      <input
+                        className="w-full rounded-md border border-zinc-300 px-3 py-2 text-sm outline-none focus:border-zinc-500"
+                        id={`wishlist-date-${item.id}`}
+                        onChange={(event) =>
+                          setEditDraft((current) => ({ ...current, occasionDate: event.target.value }))
+                        }
+                        type="date"
+                        value={editDraft.occasionDate}
+                      />
+                      {editFieldErrors.occasionDate ? (
+                        <p className="mt-1 text-xs text-rose-700">{editFieldErrors.occasionDate}</p>
+                      ) : null}
+                    </div>
+
+                    <div>
+                      <label className="mb-1 block text-xs font-medium text-zinc-700" htmlFor={`wishlist-note-${item.id}`}>
+                        Description
+                      </label>
+                      <textarea
+                        className="min-h-24 w-full rounded-md border border-zinc-300 px-3 py-2 text-sm outline-none focus:border-zinc-500"
+                        id={`wishlist-note-${item.id}`}
+                        maxLength={NOTE_MAX}
+                        onChange={(event) =>
+                          setEditDraft((current) => ({ ...current, occasionNote: event.target.value }))
+                        }
+                        value={editDraft.occasionNote}
+                      />
+                      {editFieldErrors.occasionNote ? (
+                        <p className="mt-1 text-xs text-rose-700">{editFieldErrors.occasionNote}</p>
+                      ) : null}
+                    </div>
+
+                    {editError ? <p className="text-sm text-rose-700">{editError}</p> : null}
+
+                    <div className="flex flex-wrap items-center gap-2">
+                      <button
+                        className="btn-notch btn-notch--ink"
+                        disabled={savingWishlistId === item.id}
+                        onClick={() => void saveWishlistDetails(item)}
+                        type="button"
+                      >
+                        {savingWishlistId === item.id ? "Saving..." : "Save details"}
+                      </button>
+                      <button className="btn-notch" onClick={cancelEditingWishlist} type="button">
+                        Cancel
+                      </button>
+                    </div>
+                  </div>
+                ) : (
+                  <div className="mt-4 flex flex-wrap items-center gap-2">
+                    <button className="btn-notch" onClick={() => startEditingWishlist(item)} type="button">
+                      Edit details
+                    </button>
+                    <Link className="btn-notch" href={`/wishlists/${item.id}`}>
+                      Open editor
+                    </Link>
+                    <button
+                      className="btn-notch btn-notch--ink"
+                      onClick={() => copyShareLink(item.shareUrlPreview)}
+                      type="button"
+                    >
+                      Copy share link
+                    </button>
+                    <button
+                      className="btn-notch btn-notch--rose"
+                      disabled={deletingWishlistId === item.id}
+                      onClick={() => void deleteWishlist(item)}
+                      type="button"
+                    >
+                      {deletingWishlistId === item.id ? "Deleting..." : "Delete wishlist"}
+                    </button>
+                  </div>
+                )}
+              </article>
+            );
+          })
         )}
       </section>
     </main>

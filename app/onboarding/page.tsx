@@ -12,6 +12,8 @@ type OnboardingErrors = {
   occasionNote?: string;
 };
 
+const CREATE_WISHLIST_TIMEOUT_MS = 15_000;
+
 export default function OnboardingPage() {
   const router = useRouter();
 
@@ -45,6 +47,9 @@ export default function OnboardingPage() {
     }
 
     setIsSubmitting(true);
+    const controller = new AbortController();
+    const timeoutId = window.setTimeout(() => controller.abort(), CREATE_WISHLIST_TIMEOUT_MS);
+
     let response: Response;
     try {
       response = await fetch("/api/wishlists", {
@@ -53,6 +58,7 @@ export default function OnboardingPage() {
           "content-type": "application/json",
           ...ownerHeaders,
         },
+        signal: controller.signal,
         body: JSON.stringify({
           title: title.trim(),
           occasionDate: occasionDate || null,
@@ -60,16 +66,26 @@ export default function OnboardingPage() {
           currency: "USD",
         }),
       });
-    } catch {
-      setIsSubmitting(false);
-      setApiError("Unable to create wishlist right now. Please retry.");
+    } catch (error) {
+      if (error instanceof DOMException && error.name === "AbortError") {
+        setApiError("Creating wishlist timed out. Please retry.");
+      } else {
+        setApiError("Unable to create wishlist right now. Please retry.");
+      }
       return;
+    } finally {
+      window.clearTimeout(timeoutId);
+      setIsSubmitting(false);
     }
 
-    const payload = (await response.json()) as WishlistCreateResponse | ApiErrorResponse;
-    setIsSubmitting(false);
+    let payload: WishlistCreateResponse | ApiErrorResponse | null = null;
+    try {
+      payload = (await response.json()) as WishlistCreateResponse | ApiErrorResponse;
+    } catch {
+      payload = null;
+    }
 
-    if (!response.ok || !payload.ok) {
+    if (!response.ok || !payload || !payload.ok) {
       if (payload && !payload.ok && payload.error.fieldErrors) {
         setErrors((prev) => ({ ...prev, ...payload.error.fieldErrors }));
       }

@@ -135,7 +135,7 @@ export async function POST(request: NextRequest) {
   }
 
   try {
-    const created = createItem({
+    const created = await createItem({
       wishlistId: validated.value.wishlistId,
       ownerEmail,
       title: validated.value.title,
@@ -186,10 +186,14 @@ export async function GET(request: NextRequest) {
     return errorResponse(403, "FORBIDDEN", "You do not have access to this wishlist.");
   }
 
-  const items = listItemsForWishlist({ wishlistId, ownerEmail });
+  try {
+    const items = await listItemsForWishlist({ wishlistId, ownerEmail });
 
-  return NextResponse.json({
-    ok: true as const,
-    items,
-  });
+    return NextResponse.json({
+      ok: true as const,
+      items,
+    });
+  } catch {
+    return errorResponse(500, "INTERNAL_ERROR", "Unable to load items right now.");
+  }
 }

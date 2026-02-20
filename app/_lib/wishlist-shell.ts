@@ -47,6 +47,17 @@ export type WishlistCreateResponse = {
   };
 };
 
+export type WishlistUpdatePayload = {
+  title: string;
+  occasionDate: string | null;
+  occasionNote: string | null;
+};
+
+export type WishlistUpdateResponse = {
+  ok: true;
+  wishlist: WishlistPreview;
+};
+
 export function parseWishlistSort(value: string | null): WishlistSort {
   return value === "title_asc" ? "title_asc" : "updated_desc";
 }

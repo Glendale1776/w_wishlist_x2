@@ -68,7 +68,7 @@ export async function resolvePublicWishlistReadModel(input: {
 
   const canonicalHost = normalizeCanonicalHost(input.canonicalHost);
   const wishlist = resolved.wishlist;
-  const rawItems = listPublicItemsForWishlist({ wishlistId: wishlist.id });
+  const rawItems = await listPublicItemsForWishlist({ wishlistId: wishlist.id });
   const version = buildVersion(
     wishlist.updatedAt,
     rawItems.map((item) => ({ id: item.id, updatedAt: item.updatedAt })),

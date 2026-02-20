@@ -24,19 +24,19 @@ function errorResponse(
   );
 }
 
-async function resolveOwnerIdentity(request: NextRequest): Promise<{ email: string; userId: string } | null> {
-  const auth = await authenticateOwnerRequest(request);
-  if (!auth.ok) return null;
-  return auth;
-}
-
 function parseSort(value: string | null): WishlistSort {
   return value === "title_asc" ? "title_asc" : "updated_desc";
 }
 
 export async function GET(request: NextRequest) {
-  const owner = await resolveOwnerIdentity(request);
-  if (!owner) {
+  const owner = await authenticateOwnerRequest(request);
+  if (!owner.ok) {
+    if (owner.code === "AUTH_TIMEOUT") {
+      return errorResponse(503, "INTERNAL_ERROR", "Auth verification timed out. Please retry.");
+    }
+    if (owner.code === "AUTH_MISMATCH") {
+      return errorResponse(403, "FORBIDDEN", "Request owner does not match the signed-in account.");
+    }
     return errorResponse(401, "AUTH_REQUIRED", "Sign in is required to access wishlists.");
   }
 
@@ -59,8 +59,14 @@ export async function GET(request: NextRequest) {
 }
 
 export async function POST(request: NextRequest) {
-  const owner = await resolveOwnerIdentity(request);
-  if (!owner) {
+  const owner = await authenticateOwnerRequest(request);
+  if (!owner.ok) {
+    if (owner.code === "AUTH_TIMEOUT") {
+      return errorResponse(503, "INTERNAL_ERROR", "Auth verification timed out. Please retry.");
+    }
+    if (owner.code === "AUTH_MISMATCH") {
+      return errorResponse(403, "FORBIDDEN", "Request owner does not match the signed-in account.");
+    }
     return errorResponse(401, "AUTH_REQUIRED", "Sign in is required to create a wishlist.");
   }
 

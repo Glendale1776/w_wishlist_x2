@@ -9,7 +9,7 @@ const TITLE_MAX = 120;
 const DESCRIPTION_MAX = 600;
 const IMAGE_LIMIT = 10;
 
-type ApiErrorCode = "AUTH_REQUIRED" | "VALIDATION_ERROR" | "FORBIDDEN" | "NOT_FOUND";
+type ApiErrorCode = "AUTH_REQUIRED" | "VALIDATION_ERROR" | "FORBIDDEN" | "NOT_FOUND" | "INTERNAL_ERROR";
 
 type ItemPayload = {
   title?: string;
@@ -118,18 +118,23 @@ export async function PATCH(request: NextRequest, context: { params: Promise<{ i
 
   const { id } = await context.params;
 
-  const updated = updateItem({
-    itemId: id,
-    ownerEmail,
-    title: validated.value.title,
-    description: validated.value.description,
-    url: validated.value.url,
-    priceCents: validated.value.priceCents,
-    imageUrl: validated.value.imageUrl,
-    imageUrls: validated.value.imageUrls,
-    isGroupFunded: validated.value.isGroupFunded,
-    targetCents: validated.value.targetCents,
-  });
+  let updated: Awaited<ReturnType<typeof updateItem>>;
+  try {
+    updated = await updateItem({
+      itemId: id,
+      ownerEmail,
+      title: validated.value.title,
+      description: validated.value.description,
+      url: validated.value.url,
+      priceCents: validated.value.priceCents,
+      imageUrl: validated.value.imageUrl,
+      imageUrls: validated.value.imageUrls,
+      isGroupFunded: validated.value.isGroupFunded,
+      targetCents: validated.value.targetCents,
+    });
+  } catch {
+    return errorResponse(500, "INTERNAL_ERROR", "Unable to update item right now.");
+  }
 
   if ("error" in updated) {
     if (updated.error === "NOT_FOUND") {

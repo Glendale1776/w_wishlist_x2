@@ -155,7 +155,7 @@ export async function POST(request: NextRequest, context: { params: Promise<{ id
 
   if (mode === "preview") {
     const imageIndex = Number.isInteger(payload.imageIndex) && payload.imageIndex !== undefined && payload.imageIndex >= 0 ? payload.imageIndex : 0;
-    const result = createItemImagePreview({
+    const result = await createItemImagePreview({
       itemId: id,
       ownerEmail,
       imageIndex,
@@ -208,7 +208,7 @@ export async function POST(request: NextRequest, context: { params: Promise<{ id
     return errorResponse(422, "VALIDATION_ERROR", "Please fix the highlighted fields.", fieldErrors);
   }
 
-  const result = prepareItemImageUpload({
+  const result = await prepareItemImageUpload({
     itemId: id,
     ownerEmail,
     filename: filename || "image",

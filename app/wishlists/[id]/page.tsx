@@ -1690,9 +1690,9 @@ export default function WishlistEditorPage() {
               <p className="text-xs font-semibold uppercase tracking-[0.18em] text-sky-700">Title, Description & Price</p>
               <ul className="mt-2 list-disc space-y-1 pl-5 text-xs leading-5 text-zinc-600">
                 <li>Include item name and short context.</li>
-                <li>Add price in USD (for example: <code>129.99</code> or <code>$129.99</code>).</li>
+                <li>Add price in USD.</li>
                 <li>Add must-have specs first: color, size, model, version.</li>
-                <li>Optional: add extra notes like accessories or preferred store.</li>
+                <li>Optional: add extra notes like accessories.</li>
                 <li>Optional: paste product URL below to import details. Your notes stay first.</li>
               </ul>
 

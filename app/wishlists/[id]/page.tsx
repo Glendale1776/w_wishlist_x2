@@ -1236,8 +1236,11 @@ export default function WishlistEditorPage() {
     }
 
     const draftText = form.description.trim();
-    if (!draftText) {
-      setFieldErrors({ description: "Enter title, description, and price details in this field." });
+    const normalizedUrl = form.url.trim();
+    if (!draftText && !normalizedUrl) {
+      setFieldErrors({
+        description: "Enter title, description, and price details, or provide a product URL to import.",
+      });
       return;
     }
 
@@ -1248,7 +1251,6 @@ export default function WishlistEditorPage() {
     let submissionTarget = form.target;
     let metadataReviewNotice: string | null = null;
 
-    const normalizedUrl = form.url.trim();
     if (normalizedUrl) {
       setMetadataMessage("Importing details from URL before save...");
       const metadataResult = await fetchMetadataForUrl({
@@ -1290,6 +1292,14 @@ export default function WishlistEditorPage() {
       } else {
         setMetadataMessage(metadataResult.message);
       }
+    }
+
+    if (!draftTextForParsing.trim()) {
+      setIsSubmitting(false);
+      setFieldErrors({
+        description: "Could not import item details from URL. Add item details in the text field or try another URL.",
+      });
+      return;
     }
 
     const parsedDraftResult = await parseDraftTextWithAi(ownerEmail, draftTextForParsing);
@@ -1500,6 +1510,7 @@ export default function WishlistEditorPage() {
     setFormError(null);
     setFormSuccess(null);
     setImageMessage(null);
+    setMetadataMessage(null);
 
     if (!editingItemId) {
       setForm((current) => ({ ...current, imageUrls: [] }));
@@ -1516,12 +1527,38 @@ export default function WishlistEditorPage() {
     }
 
     const draftText = form.description.trim();
-    if (!draftText) {
-      setFieldErrors({ description: "Enter title, description, and price details in this field." });
+    const normalizedUrl = form.url.trim();
+    let draftTextForParsing = draftText;
+
+    if (!draftTextForParsing && normalizedUrl) {
+      setMetadataMessage("Importing details from URL before save...");
+      const metadataResult = await fetchMetadataForUrl({
+        ownerEmail,
+        url: normalizedUrl,
+        specNotes: draftTextForParsing,
+      });
+
+      if (metadataResult.ok) {
+        draftTextForParsing = mergeDraftTextWithImported({
+          currentDraftText: draftTextForParsing,
+          importedTitle: metadataResult.metadata.title,
+          importedDescription: metadataResult.metadata.description,
+          importedPriceCents: metadataResult.metadata.priceCents,
+        });
+        setMetadataMessage("URL details applied before save.");
+      } else {
+        setMetadataMessage(metadataResult.message);
+      }
+    }
+
+    if (!draftTextForParsing.trim()) {
+      setFieldErrors({
+        description: "Could not import item details from URL. Add item details in the text field or try another URL.",
+      });
       return;
     }
 
-    const parsedDraftResult = await parseDraftTextWithAi(ownerEmail, draftText);
+    const parsedDraftResult = await parseDraftTextWithAi(ownerEmail, draftTextForParsing);
     if (!parsedDraftResult) return;
 
     const payload = buildPayload(wishlistId, { ...form, imageUrls: [] }, parsedDraftResult.parsed);
@@ -1619,7 +1656,7 @@ export default function WishlistEditorPage() {
       {reservationLiveNotice ? <p className="mt-2 text-sm font-medium text-emerald-700">{reservationLiveNotice}</p> : null}
 
       <section className="mt-6 grid items-start gap-6 lg:grid-cols-[1fr_1.2fr]">
-        <aside className="self-start rounded-2xl bg-white/50 p-4 sm:p-5 lg:mt-10">
+        <div className="hidden lg:grid lg:col-span-2 lg:grid-cols-[1fr_1.2fr] lg:items-center lg:gap-6">
           <div className="flex items-center justify-between">
             <h2 className="text-lg font-semibold">{editingItemId ? "Edit item" : "Add item"}</h2>
             {editingItemId ? (
@@ -1628,8 +1665,27 @@ export default function WishlistEditorPage() {
               </button>
             ) : null}
           </div>
+          <div className="flex flex-wrap items-center justify-between gap-2">
+            <h2 className="text-lg font-semibold">Items</h2>
+            {activeItems.length > 0 ? (
+              <p className="text-sm font-medium text-zinc-700">
+                {activeReservedCount} of {activeItems.length} reserved
+              </p>
+            ) : null}
+          </div>
+        </div>
 
-          <form className="mt-4 space-y-4" onSubmit={onSubmit} noValidate>
+        <aside className="self-start rounded-2xl bg-white/50 p-4 sm:p-5">
+          <div className="flex items-center justify-between lg:hidden">
+            <h2 className="text-lg font-semibold">{editingItemId ? "Edit item" : "Add item"}</h2>
+            {editingItemId ? (
+              <button className="text-sm font-medium text-zinc-700 underline" onClick={resetForm} type="button">
+                Cancel edit
+              </button>
+            ) : null}
+          </div>
+
+          <form className="mt-4 space-y-4 lg:mt-0" onSubmit={onSubmit} noValidate>
             <section className="rounded-xl border border-sky-100 bg-sky-50/40 p-3 sm:p-4">
               <p className="text-xs font-semibold uppercase tracking-[0.18em] text-sky-700">Title, Description & Price</p>
               <ul className="mt-2 list-disc space-y-1 pl-5 text-xs leading-5 text-zinc-600">
@@ -1862,7 +1918,7 @@ export default function WishlistEditorPage() {
         </aside>
 
         <section className="space-y-4">
-          <div className="flex flex-wrap items-center justify-between gap-2">
+          <div className="flex flex-wrap items-center justify-between gap-2 lg:hidden">
             <h2 className="text-lg font-semibold">Items</h2>
             {activeItems.length > 0 ? (
               <p className="text-sm font-medium text-zinc-700">

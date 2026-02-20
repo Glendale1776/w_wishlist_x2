@@ -499,19 +499,36 @@ export default function PublicWishlistClient({ shareToken }: { shareToken: strin
     setContributionInput("");
   }
 
-  function openModal(itemId: string) {
+  const openModal = useCallback((itemId: string) => {
     setActiveItemId(itemId);
     setActionError(null);
     setActionSuccess(null);
     setContributionInput("");
-  }
+  }, []);
 
-  function closeModal() {
+  const closeModal = useCallback(() => {
     setActiveItemId(null);
     setActionError(null);
     setActionSuccess(null);
     setContributionInput("");
-  }
+    const params = new URLSearchParams(searchParams.toString());
+    if (!params.has("item")) return;
+    params.delete("item");
+    const nextQuery = params.toString();
+    const nextPath = `/l/${encodeURIComponent(shareToken)}${nextQuery ? `?${nextQuery}` : ""}`;
+    router.replace(nextPath);
+  }, [router, searchParams, shareToken]);
+
+  useEffect(() => {
+    if (!activeItemId) return;
+
+    function onWindowKeyDown(event: KeyboardEvent) {
+      if (event.key === "Escape") closeModal();
+    }
+
+    window.addEventListener("keydown", onWindowKeyDown);
+    return () => window.removeEventListener("keydown", onWindowKeyDown);
+  }, [activeItemId, closeModal]);
 
   return (
     <main className="mx-auto min-h-screen max-w-5xl px-4 py-8 sm:px-6 sm:py-10">
@@ -694,7 +711,12 @@ export default function PublicWishlistClient({ shareToken }: { shareToken: strin
       ) : null}
 
       {activeItem ? (
-        <div className="fixed inset-0 z-50 flex items-end bg-black/40 p-3 sm:items-center sm:justify-center">
+        <div
+          className="fixed inset-0 z-50 flex items-end bg-black/40 p-3 sm:items-center sm:justify-center"
+          onClick={(event) => {
+            if (event.target === event.currentTarget) closeModal();
+          }}
+        >
           <div className="w-full max-w-lg rounded-2xl bg-white p-5 shadow-lg sm:p-6">
             <div className="flex items-start justify-between gap-3">
               <div>

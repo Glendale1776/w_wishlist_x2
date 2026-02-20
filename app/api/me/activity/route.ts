@@ -36,11 +36,13 @@ export async function GET(request: NextRequest) {
 
   const rows = listActivityForActor({ actorEmail });
 
-  const activities = rows
-    .filter((row) => (wishlistIdFilter ? row.wishlistId === wishlistIdFilter : true))
-    .map((row) => {
-      const wishlist = getWishlistRecordById(row.wishlistId);
-      const shareToken = getPublicShareTokenForWishlist(row.wishlistId);
+  const filteredRows = rows.filter((row) => (wishlistIdFilter ? row.wishlistId === wishlistIdFilter : true));
+  const activities = await Promise.all(
+    filteredRows.map(async (row) => {
+      const [wishlist, shareToken] = await Promise.all([
+        getWishlistRecordById(row.wishlistId),
+        getPublicShareTokenForWishlist(row.wishlistId),
+      ]);
 
       return {
         id: row.id,
@@ -55,7 +57,8 @@ export async function GET(request: NextRequest) {
         happenedAt: row.happenedAt,
         openItemPath: shareToken ? `/l/${shareToken}?item=${row.itemId}` : null,
       };
-    });
+    }),
+  );
 
   return NextResponse.json({
     ok: true as const,

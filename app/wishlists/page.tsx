@@ -2,9 +2,9 @@
 
 import Link from "next/link";
 import { useRouter, useSearchParams } from "next/navigation";
-import { Suspense, useEffect, useState } from "react";
+import { Suspense, useEffect, useRef, useState } from "react";
 
-import { getAuthenticatedEmail, persistReturnTo } from "@/app/_lib/auth-client";
+import { getAuthenticatedOwnerHeaders, persistReturnTo } from "@/app/_lib/auth-client";
 import {
   ApiErrorResponse,
   createWishlistsQuery,
@@ -28,10 +28,13 @@ function WishlistsContent() {
   const [loadError, setLoadError] = useState<string | null>(null);
   const [list, setList] = useState<WishlistPreview[]>([]);
   const [deletingWishlistId, setDeletingWishlistId] = useState<string | null>(null);
+  const [isFiltersOpen, setIsFiltersOpen] = useState(false);
+  const filtersRef = useRef<HTMLDivElement | null>(null);
 
   const search = searchParams.get("search") || "";
   const sort = parseWishlistSort(searchParams.get("sort"));
   const created = searchParams.get("created") === "1";
+  const hasActiveFilters = Boolean(search.trim()) || sort !== "updated_desc";
 
   useEffect(() => {
     if (!created) return;
@@ -50,14 +53,34 @@ function WishlistsContent() {
   }, [toast]);
 
   useEffect(() => {
+    if (!isFiltersOpen) return;
+
+    function onDocumentMouseDown(event: MouseEvent) {
+      const target = event.target;
+      if (!filtersRef.current || !(target instanceof Node)) return;
+      if (!filtersRef.current.contains(target)) setIsFiltersOpen(false);
+    }
+
+    function onDocumentKeyDown(event: KeyboardEvent) {
+      if (event.key === "Escape") setIsFiltersOpen(false);
+    }
+
+    document.addEventListener("mousedown", onDocumentMouseDown);
+    document.addEventListener("keydown", onDocumentKeyDown);
+    return () => {
+      document.removeEventListener("mousedown", onDocumentMouseDown);
+      document.removeEventListener("keydown", onDocumentKeyDown);
+    };
+  }, [isFiltersOpen]);
+
+  useEffect(() => {
     let cancelled = false;
 
     async function run() {
       const query = createWishlistsQuery(search, sort);
       const returnTo = query ? `/wishlists?${query}` : "/wishlists";
-      const ownerEmail = await getAuthenticatedEmail();
-
-      if (!ownerEmail) {
+      const ownerHeaders = await getAuthenticatedOwnerHeaders();
+      if (!ownerHeaders) {
         persistReturnTo(returnTo);
         router.replace(`/login?returnTo=${encodeURIComponent(returnTo)}`);
         return;
@@ -68,7 +91,7 @@ function WishlistsContent() {
 
       try {
         const response = await fetch(`/api/wishlists${query ? `?${query}` : ""}`, {
-          headers: { "x-owner-email": ownerEmail },
+          headers: ownerHeaders,
         });
 
         const payload = (await response.json()) as WishlistListResponse | ApiErrorResponse;
@@ -126,6 +149,10 @@ function WishlistsContent() {
     router.replace(query ? `/wishlists?${query}` : "/wishlists");
   }
 
+  function resetFilters() {
+    setQueryValues({ search: "", sort: "updated_desc" });
+  }
+
   async function copyShareLink(shareUrl: string) {
     try {
       await navigator.clipboard.writeText(shareUrl);
@@ -141,8 +168,8 @@ function WishlistsContent() {
     );
     if (!confirmed) return;
 
-    const ownerEmail = await getAuthenticatedEmail();
-    if (!ownerEmail) {
+    const ownerHeaders = await getAuthenticatedOwnerHeaders();
+    if (!ownerHeaders) {
       persistReturnTo("/wishlists");
       router.replace("/login?returnTo=/wishlists");
       return;
@@ -154,9 +181,7 @@ function WishlistsContent() {
     try {
       response = await fetch(`/api/wishlists/${encodeURIComponent(item.id)}`, {
         method: "DELETE",
-        headers: {
-          "x-owner-email": ownerEmail,
-        },
+        headers: ownerHeaders,
       });
     } catch {
       setDeletingWishlistId(null);
@@ -210,33 +235,74 @@ function WishlistsContent() {
             <h1 className="text-2xl font-semibold tracking-tight">My wishlists</h1>
             <p className="mt-1 text-sm text-zinc-600">Search, sort, and share your wishlist links quickly.</p>
           </div>
-          <Link className="btn-notch btn-notch--ink" href="/onboarding">
-            Create wishlist
-          </Link>
-        </div>
+          <div className="flex items-center gap-2">
+            <div className="relative" ref={filtersRef}>
+              <button
+                aria-expanded={isFiltersOpen}
+                aria-haspopup="dialog"
+                className={`rounded-full border px-3 py-1.5 text-xs font-medium transition ${
+                  hasActiveFilters
+                    ? "border-sky-300 bg-sky-50 text-sky-900"
+                    : "border-zinc-300 bg-white/80 text-zinc-700 hover:bg-white"
+                }`}
+                onClick={() => setIsFiltersOpen((current) => !current)}
+                type="button"
+              >
+                Filters
+              </button>
 
-        <div className="mt-5 grid gap-3 sm:grid-cols-2">
-          <label className="text-sm">
-            <span className="mb-1 block font-medium text-zinc-800">Search</span>
-            <input
-              className="w-full rounded-md border border-zinc-300 px-3 py-2 text-sm outline-none focus:border-zinc-500"
-              onChange={(event) => setQueryValues({ search: event.target.value })}
-              placeholder="Search by title"
-              value={search}
-            />
-          </label>
+              {isFiltersOpen ? (
+                <div
+                  className="absolute right-0 top-full z-30 mt-2 w-[min(92vw,320px)] rounded-xl border border-zinc-200 bg-white p-3 shadow-lg"
+                  role="dialog"
+                >
+                  <label className="text-xs">
+                    <span className="mb-1 block font-medium text-zinc-700">Search</span>
+                    <input
+                      className="w-full rounded-md border border-zinc-300 px-3 py-2 text-sm outline-none focus:border-zinc-500"
+                      onChange={(event) => setQueryValues({ search: event.target.value })}
+                      placeholder="Search by title"
+                      value={search}
+                    />
+                  </label>
 
-          <label className="text-sm">
-            <span className="mb-1 block font-medium text-zinc-800">Sort</span>
-            <select
-              className="w-full rounded-md border border-zinc-300 px-3 py-2 text-sm outline-none focus:border-zinc-500"
-              onChange={(event) => setQueryValues({ sort: parseWishlistSort(event.target.value) })}
-              value={sort}
-            >
-              <option value="updated_desc">Most recently updated</option>
-              <option value="title_asc">Title (A-Z)</option>
-            </select>
-          </label>
+                  <label className="mt-3 block text-xs">
+                    <span className="mb-1 block font-medium text-zinc-700">Sort</span>
+                    <select
+                      className="w-full rounded-md border border-zinc-300 px-3 py-2 text-sm outline-none focus:border-zinc-500"
+                      onChange={(event) => setQueryValues({ sort: parseWishlistSort(event.target.value) })}
+                      value={sort}
+                    >
+                      <option value="updated_desc">Most recently updated</option>
+                      <option value="title_asc">Title (A-Z)</option>
+                    </select>
+                  </label>
+
+                  <div className="mt-3 flex items-center justify-between">
+                    <button
+                      className="text-xs font-medium text-zinc-500 underline underline-offset-2 disabled:no-underline disabled:opacity-40"
+                      disabled={!hasActiveFilters}
+                      onClick={resetFilters}
+                      type="button"
+                    >
+                      Clear filters
+                    </button>
+                    <button
+                      className="rounded-md border border-zinc-300 px-2.5 py-1 text-xs font-medium text-zinc-700 hover:bg-zinc-50"
+                      onClick={() => setIsFiltersOpen(false)}
+                      type="button"
+                    >
+                      Close
+                    </button>
+                  </div>
+                </div>
+              ) : null}
+            </div>
+
+            <Link className="btn-notch btn-notch--ink" href="/onboarding">
+              Create wishlist
+            </Link>
+          </div>
         </div>
       </header>
 

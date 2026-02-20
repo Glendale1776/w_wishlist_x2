@@ -25,7 +25,7 @@ function errorResponse(status: number, code: ApiErrorCode, message: string) {
 export async function GET(_request: Request, context: { params: Promise<{ share_token: string }> }) {
   const { share_token } = await context.params;
 
-  const resolved = resolvePublicWishlistReadModel({
+  const resolved = await resolvePublicWishlistReadModel({
     shareToken: share_token,
     canonicalHost: process.env.CANONICAL_HOST,
   });

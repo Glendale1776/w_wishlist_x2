@@ -25,6 +25,7 @@ type UploadUrlPayload = {
   filename?: string;
   mimeType?: string;
   sizeBytes?: number;
+  imageIndex?: number;
 };
 
 function errorResponse(status: number, code: ApiErrorCode, message: string, fieldErrors?: Record<string, string>) {
@@ -153,9 +154,11 @@ export async function POST(request: NextRequest, context: { params: Promise<{ id
   const ttlSeconds = signedUrlTtlSeconds();
 
   if (mode === "preview") {
+    const imageIndex = Number.isInteger(payload.imageIndex) && payload.imageIndex !== undefined && payload.imageIndex >= 0 ? payload.imageIndex : 0;
     const result = createItemImagePreview({
       itemId: id,
       ownerEmail,
+      imageIndex,
     });
 
     if ("error" in result) {

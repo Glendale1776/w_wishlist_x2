@@ -4,7 +4,7 @@ import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { FormEvent, useState } from "react";
 
-import { getAuthenticatedEmail, persistReturnTo } from "@/app/_lib/auth-client";
+import { getAuthenticatedOwnerHeaders, persistReturnTo } from "@/app/_lib/auth-client";
 import { ApiErrorResponse, WishlistCreateResponse } from "@/app/_lib/wishlist-shell";
 
 type OnboardingErrors = {
@@ -37,8 +37,8 @@ export default function OnboardingPage() {
     setApiError(null);
     if (nextErrors.title) return;
 
-    const ownerEmail = await getAuthenticatedEmail();
-    if (!ownerEmail) {
+    const ownerHeaders = await getAuthenticatedOwnerHeaders();
+    if (!ownerHeaders) {
       persistReturnTo("/onboarding");
       router.push("/login?returnTo=/onboarding");
       return;
@@ -51,7 +51,7 @@ export default function OnboardingPage() {
         method: "POST",
         headers: {
           "content-type": "application/json",
-          "x-owner-email": ownerEmail,
+          ...ownerHeaders,
         },
         body: JSON.stringify({
           title: title.trim(),

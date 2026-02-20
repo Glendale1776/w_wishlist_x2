@@ -1,9 +1,8 @@
 import { NextRequest, NextResponse } from "next/server";
 
 import { deleteItemsForWishlist } from "@/app/_lib/item-store";
+import { authenticateOwnerRequest } from "@/app/_lib/request-auth";
 import { deleteWishlistRecord } from "@/app/_lib/wishlist-store";
-
-const EMAIL_REGEX = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 
 type ApiErrorCode = "AUTH_REQUIRED" | "FORBIDDEN" | "NOT_FOUND" | "INTERNAL_ERROR";
 
@@ -17,24 +16,19 @@ function errorResponse(status: number, code: ApiErrorCode, message: string) {
   );
 }
 
-function getOwnerEmail(request: NextRequest): string | null {
-  const value = request.headers.get("x-owner-email")?.trim().toLowerCase() || "";
-  if (!value || !EMAIL_REGEX.test(value)) return null;
-  return value;
-}
-
 export async function DELETE(request: NextRequest, context: { params: Promise<{ id: string }> }) {
-  const ownerEmail = getOwnerEmail(request);
-  if (!ownerEmail) {
+  const owner = await authenticateOwnerRequest(request);
+  if (!owner.ok) {
     return errorResponse(401, "AUTH_REQUIRED", "Sign in is required to delete a wishlist.");
   }
 
   const { id } = await context.params;
 
   try {
-    const deleted = deleteWishlistRecord({
+    const deleted = await deleteWishlistRecord({
       wishlistId: id,
-      ownerEmail,
+      ownerEmail: owner.email,
+      ownerId: owner.userId,
     });
 
     if ("error" in deleted) {
@@ -46,7 +40,7 @@ export async function DELETE(request: NextRequest, context: { params: Promise<{ 
 
     deleteItemsForWishlist({
       wishlistId: id,
-      ownerEmail,
+      ownerEmail: owner.email,
     });
 
     return NextResponse.json({

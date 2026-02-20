@@ -120,7 +120,7 @@ function encodeMessage(message: StreamMessage): Uint8Array {
 export async function GET(request: Request, context: { params: Promise<{ share_token: string }> }) {
   const { share_token } = await context.params;
 
-  const initial = resolvePublicWishlistReadModel({
+  const initial = await resolvePublicWishlistReadModel({
     shareToken: share_token,
     canonicalHost: process.env.CANONICAL_HOST,
   });
@@ -188,52 +188,55 @@ export async function GET(request: Request, context: { params: Promise<{ share_t
         }
       };
 
-      const emit = () => {
+      const emit = async () => {
         if (closed || inFlight) return;
         inFlight = true;
 
-        const resolved = resolvePublicWishlistReadModel({
-          shareToken: share_token,
-          canonicalHost: process.env.CANONICAL_HOST,
-        });
+        try {
+          const resolved = await resolvePublicWishlistReadModel({
+            shareToken: share_token,
+            canonicalHost: process.env.CANONICAL_HOST,
+          });
 
-        if (!resolved.ok) {
-          controller.enqueue(encodeMessage({ type: "not_found" }));
-          cleanup("not_found");
-          try {
-            controller.close();
-          } catch {
-            // Ignore stream close race.
+          if (!resolved.ok) {
+            controller.enqueue(encodeMessage({ type: "not_found" }));
+            cleanup("not_found");
+            try {
+              controller.close();
+            } catch {
+              // Ignore stream close race.
+            }
+            return;
           }
+
+          if (resolved.model.version !== lastVersion) {
+            lastVersion = resolved.model.version;
+            controller.enqueue(
+              encodeMessage({
+                type: "snapshot",
+                version: resolved.model.version,
+                wishlist: resolved.model.wishlist,
+                items: resolved.model.items,
+              }),
+            );
+          } else {
+            controller.enqueue(
+              encodeMessage({
+                type: "heartbeat",
+                version: lastVersion,
+              }),
+            );
+          }
+        } finally {
           inFlight = false;
-          return;
         }
-
-        if (resolved.model.version !== lastVersion) {
-          lastVersion = resolved.model.version;
-          controller.enqueue(
-            encodeMessage({
-              type: "snapshot",
-              version: resolved.model.version,
-              wishlist: resolved.model.wishlist,
-              items: resolved.model.items,
-            }),
-          );
-        } else {
-          controller.enqueue(
-            encodeMessage({
-              type: "heartbeat",
-              version: lastVersion,
-            }),
-          );
-        }
-
-        inFlight = false;
       };
 
       request.signal.addEventListener("abort", onAbort);
-      emit();
-      intervalId = setInterval(emit, heartbeatSec * 1000);
+      void emit();
+      intervalId = setInterval(() => {
+        void emit();
+      }, heartbeatSec * 1000);
     },
     cancel() {
       // Request abort listener handles timer cleanup for most disconnects.

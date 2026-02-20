@@ -13,6 +13,12 @@ export type AuthFieldErrors = {
   password?: string;
 };
 
+export type AuthIdentity = {
+  email: string;
+  userId: string;
+  accessToken: string;
+};
+
 const RETURN_TO_KEY = "w_wishlist:return_to";
 const EMAIL_REGEX = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 const PASSWORD_MIN_LENGTH = 8;
@@ -78,7 +84,7 @@ export async function isAuthenticated(): Promise<boolean> {
   return Boolean(email);
 }
 
-export async function getAuthenticatedEmail(): Promise<string | null> {
+export async function getAuthenticatedIdentity(): Promise<AuthIdentity | null> {
   if (typeof window === "undefined") return null;
 
   try {
@@ -86,12 +92,35 @@ export async function getAuthenticatedEmail(): Promise<string | null> {
     const { data, error } = await supabase.auth.getSession();
     if (error) return null;
 
-    const email = data.session?.user?.email?.trim().toLowerCase() ?? "";
-    if (!EMAIL_REGEX.test(email)) return null;
-    return email;
+    const session = data.session;
+    const email = session?.user?.email?.trim().toLowerCase() ?? "";
+    const userId = session?.user?.id?.trim() ?? "";
+    const accessToken = session?.access_token?.trim() ?? "";
+
+    if (!EMAIL_REGEX.test(email) || !userId || !accessToken) return null;
+    return {
+      email,
+      userId,
+      accessToken,
+    };
   } catch {
     return null;
   }
+}
+
+export async function getAuthenticatedEmail(): Promise<string | null> {
+  const identity = await getAuthenticatedIdentity();
+  return identity?.email ?? null;
+}
+
+export async function getAuthenticatedOwnerHeaders(): Promise<Record<string, string> | null> {
+  const identity = await getAuthenticatedIdentity();
+  if (!identity) return null;
+
+  return {
+    "x-owner-email": identity.email,
+    authorization: `Bearer ${identity.accessToken}`,
+  };
 }
 
 export async function signOut(): Promise<void> {

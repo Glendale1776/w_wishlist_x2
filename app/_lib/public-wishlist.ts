@@ -53,11 +53,11 @@ function buildVersion(wishlistUpdatedAt: string, itemVersions: Array<{ id: strin
   return createHash("sha1").update(source).digest("hex").slice(0, 12);
 }
 
-export function resolvePublicWishlistReadModel(input: {
+export async function resolvePublicWishlistReadModel(input: {
   shareToken: string;
   canonicalHost?: string;
-}): PublicWishlistResolveResult {
-  const resolved = resolvePublicWishlistByToken(input.shareToken);
+}): Promise<PublicWishlistResolveResult> {
+  const resolved = await resolvePublicWishlistByToken(input.shareToken);
 
   if ("error" in resolved) {
     return {

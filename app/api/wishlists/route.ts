@@ -1,13 +1,13 @@
 import { NextRequest, NextResponse } from "next/server";
 
+import { authenticateOwnerRequest } from "@/app/_lib/request-auth";
 import { createWishlistRecord, listWishlistRecords, WishlistSort } from "@/app/_lib/wishlist-store";
 
-const EMAIL_REGEX = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 const CURRENCY_REGEX = /^[A-Z]{3}$/;
 const TITLE_MAX = 80;
 const NOTE_MAX = 200;
 
-type ApiErrorCode = "AUTH_REQUIRED" | "VALIDATION_ERROR" | "INTERNAL_ERROR";
+type ApiErrorCode = "AUTH_REQUIRED" | "FORBIDDEN" | "VALIDATION_ERROR" | "INTERNAL_ERROR";
 
 function errorResponse(
   status: number,
@@ -24,10 +24,10 @@ function errorResponse(
   );
 }
 
-function getOwnerEmail(request: NextRequest): string | null {
-  const value = request.headers.get("x-owner-email")?.trim().toLowerCase() || "";
-  if (!value || !EMAIL_REGEX.test(value)) return null;
-  return value;
+async function resolveOwnerIdentity(request: NextRequest): Promise<{ email: string; userId: string } | null> {
+  const auth = await authenticateOwnerRequest(request);
+  if (!auth.ok) return null;
+  return auth;
 }
 
 function parseSort(value: string | null): WishlistSort {
@@ -35,8 +35,8 @@ function parseSort(value: string | null): WishlistSort {
 }
 
 export async function GET(request: NextRequest) {
-  const ownerEmail = getOwnerEmail(request);
-  if (!ownerEmail) {
+  const owner = await resolveOwnerIdentity(request);
+  if (!owner) {
     return errorResponse(401, "AUTH_REQUIRED", "Sign in is required to access wishlists.");
   }
 
@@ -44,8 +44,9 @@ export async function GET(request: NextRequest) {
   const search = searchParams.get("search") || "";
   const sort = parseSort(searchParams.get("sort"));
 
-  const wishlists = listWishlistRecords({
-    ownerEmail,
+  const wishlists = await listWishlistRecords({
+    ownerEmail: owner.email,
+    ownerId: owner.userId,
     search,
     sort,
     canonicalHost: process.env.CANONICAL_HOST,
@@ -58,8 +59,8 @@ export async function GET(request: NextRequest) {
 }
 
 export async function POST(request: NextRequest) {
-  const ownerEmail = getOwnerEmail(request);
-  if (!ownerEmail) {
+  const owner = await resolveOwnerIdentity(request);
+  if (!owner) {
     return errorResponse(401, "AUTH_REQUIRED", "Sign in is required to create a wishlist.");
   }
 
@@ -97,8 +98,9 @@ export async function POST(request: NextRequest) {
   }
 
   try {
-    const created = createWishlistRecord({
-      ownerEmail,
+    const created = await createWishlistRecord({
+      ownerEmail: owner.email,
+      ownerId: owner.userId,
       title,
       occasionDate,
       occasionNote,
@@ -122,7 +124,10 @@ export async function POST(request: NextRequest) {
       },
       { status: 201 },
     );
-  } catch {
+  } catch (error) {
+    if (error instanceof Error && error.message === "OWNER_NOT_FOUND") {
+      return errorResponse(401, "AUTH_REQUIRED", "Sign in is required to create a wishlist.");
+    }
     return errorResponse(500, "INTERNAL_ERROR", "Unable to create wishlist right now.");
   }
 }

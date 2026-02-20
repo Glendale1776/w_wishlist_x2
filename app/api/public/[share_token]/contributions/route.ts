@@ -130,7 +130,7 @@ export async function POST(request: NextRequest, context: { params: Promise<{ sh
   }
 
   const { share_token } = await context.params;
-  const resolvedWishlist = resolvePublicWishlistByToken(share_token);
+  const resolvedWishlist = await resolvePublicWishlistByToken(share_token);
   if ("error" in resolvedWishlist) {
     return errorResponse(404, "NOT_FOUND", "This shared wishlist is unavailable.");
   }

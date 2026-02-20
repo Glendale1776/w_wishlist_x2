@@ -4,7 +4,7 @@ import Link from "next/link";
 import { useParams, useRouter } from "next/navigation";
 import { FormEvent, useEffect, useMemo, useRef, useState } from "react";
 
-import { getAuthenticatedEmail, persistReturnTo } from "@/app/_lib/auth-client";
+import { getAuthenticatedEmail, getAuthenticatedOwnerHeaders, persistReturnTo } from "@/app/_lib/auth-client";
 import type { ItemRecord } from "@/app/_lib/item-store";
 
 type ItemFormValues = {
@@ -250,12 +250,22 @@ export default function WishlistEditorPage() {
   const [isUploadingImage, setIsUploadingImage] = useState(false);
   const [uploadProgress, setUploadProgress] = useState(0);
   const [imageMessage, setImageMessage] = useState<string | null>(null);
+  const [reviewingItemId, setReviewingItemId] = useState<string | null>(null);
+  const [reviewImageUrls, setReviewImageUrls] = useState<string[]>([]);
+  const [reviewImageIndex, setReviewImageIndex] = useState(0);
+  const [reviewImageError, setReviewImageError] = useState<string | null>(null);
+  const [isLoadingReviewImages, setIsLoadingReviewImages] = useState(false);
 
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const pendingImagesRef = useRef<PendingImage[]>([]);
+  const reviewLoadTokenRef = useRef<string | null>(null);
 
   const activeItems = useMemo(() => items.filter((item) => !item.archivedAt), [items]);
   const archivedItems = useMemo(() => items.filter((item) => Boolean(item.archivedAt)), [items]);
+  const reviewingItem = useMemo(
+    () => items.find((item) => item.id === reviewingItemId) || null,
+    [items, reviewingItemId],
+  );
 
   const duplicateUrlWarning = useMemo(() => {
     const normalized = form.url.trim().toLowerCase();
@@ -275,6 +285,7 @@ export default function WishlistEditorPage() {
   }, [editingItemId, form.imageUrls, imagePreviewByItemId, pendingImages]);
 
   const activeImageCount = form.imageUrls.length + pendingImages.length;
+  const currentReviewImageUrl = reviewImageUrls[reviewImageIndex] || null;
 
   useEffect(() => {
     let cancelled = false;
@@ -314,10 +325,14 @@ export default function WishlistEditorPage() {
         setItems(payload.items);
 
         try {
+          const ownerHeaders = await getAuthenticatedOwnerHeaders();
+          if (!ownerHeaders) {
+            setShareUrlPreview(null);
+            return;
+          }
+
           const wishlistsResponse = await fetch("/api/wishlists", {
-            headers: {
-              "x-owner-email": ownerEmail,
-            },
+            headers: ownerHeaders,
           });
 
           const wishlistsPayload = (await wishlistsResponse.json()) as WishlistsListResponse;
@@ -419,6 +434,27 @@ export default function WishlistEditorPage() {
     };
   }, []);
 
+  useEffect(() => {
+    if (!reviewingItemId) return;
+
+    function onWindowKeyDown(event: KeyboardEvent) {
+      if (event.key === "Escape") {
+        closeItemReview();
+      }
+    }
+
+    window.addEventListener("keydown", onWindowKeyDown);
+    return () => window.removeEventListener("keydown", onWindowKeyDown);
+  }, [reviewingItemId]);
+
+  useEffect(() => {
+    if (reviewImageUrls.length === 0) {
+      setReviewImageIndex(0);
+      return;
+    }
+    setReviewImageIndex((current) => Math.min(current, reviewImageUrls.length - 1));
+  }, [reviewImageUrls]);
+
   function clearPendingImages() {
     setPendingImages((current) => {
       current.forEach((pendingImage) => {
@@ -482,6 +518,77 @@ export default function WishlistEditorPage() {
       });
     } catch {
       return;
+    }
+  }
+
+  function closeItemReview() {
+    reviewLoadTokenRef.current = null;
+    setReviewingItemId(null);
+    setReviewImageUrls([]);
+    setReviewImageError(null);
+    setReviewImageIndex(0);
+    setIsLoadingReviewImages(false);
+  }
+
+  async function openItemReview(item: ItemRecord) {
+    const imageRefs = getItemImageUrls(item);
+    const nextToken = createIdempotencyKey();
+    reviewLoadTokenRef.current = nextToken;
+
+    setReviewingItemId(item.id);
+    setReviewImageError(null);
+    setReviewImageIndex(0);
+    setReviewImageUrls([]);
+
+    if (imageRefs.length === 0) {
+      setReviewImageUrls([]);
+      setIsLoadingReviewImages(false);
+      return;
+    }
+
+    const ownerEmail = await getAuthenticatedEmail();
+    if (!ownerEmail) {
+      persistReturnTo(`/wishlists/${wishlistId}`);
+      router.replace(`/login?returnTo=${encodeURIComponent(`/wishlists/${wishlistId}`)}`);
+      closeItemReview();
+      return;
+    }
+
+    setIsLoadingReviewImages(true);
+
+    const resolved = await Promise.all(
+      imageRefs.map(async (imageRef, imageIndex) => {
+        if (!isStorageImageRef(imageRef)) return imageRef;
+
+        try {
+          const response = await fetch(`/api/items/${item.id}/image-upload-url`, {
+            method: "POST",
+            headers: {
+              "content-type": "application/json",
+              "x-owner-email": ownerEmail,
+            },
+            body: JSON.stringify({ mode: "preview", imageIndex }),
+          });
+
+          const payload = (await response.json()) as ImagePreviewResponse;
+          if (!response.ok || !payload.ok || !payload.previewUrl) return null;
+          return payload.previewUrl;
+        } catch {
+          return null;
+        }
+      }),
+    );
+
+    if (reviewLoadTokenRef.current !== nextToken) {
+      return;
+    }
+
+    const nextUrls = resolved.filter((value): value is string => Boolean(value));
+    setReviewImageUrls(nextUrls);
+    setIsLoadingReviewImages(false);
+
+    if (nextUrls.length === 0) {
+      setReviewImageError("No image previews available for this item.");
     }
   }
 
@@ -1065,25 +1172,23 @@ export default function WishlistEditorPage() {
             </div>
 
             <div>
-              <div className="mb-1 flex items-center justify-between">
-                <label className="block text-sm font-medium text-zinc-800" htmlFor="item-url">
-                  Product URL
-                </label>
-                <button
-                  className="text-xs font-medium text-zinc-700 underline"
-                  disabled={isFetchingMetadata}
-                  onClick={onAutofillFromUrl}
-                  type="button"
-                >
-                  {isFetchingMetadata ? "Autofilling..." : "Autofill from URL"}
-                </button>
-              </div>
+              <label className="mb-1 block text-sm font-medium text-zinc-800" htmlFor="item-url">
+                Product URL
+              </label>
               <input
                 className="w-full rounded-md border border-zinc-300 px-3 py-2 text-sm outline-none focus:border-zinc-500"
                 id="item-url"
                 onChange={(event) => setForm((prev) => ({ ...prev, url: event.target.value }))}
                 value={form.url}
               />
+              <button
+                className="btn-notch btn-notch--ink mt-2 w-full"
+                disabled={isFetchingMetadata}
+                onClick={onAutofillFromUrl}
+                type="button"
+              >
+                {isFetchingMetadata ? "Importing from URL..." : "One-click import from URL"}
+              </button>
               {fieldErrors.url ? <p className="mt-1 text-xs text-rose-700">{fieldErrors.url}</p> : null}
               {duplicateUrlWarning ? (
                 <p className="mt-1 text-xs text-amber-700">Duplicate URL detected in this wishlist. You can still save.</p>
@@ -1243,62 +1348,74 @@ export default function WishlistEditorPage() {
               No items yet. Add your first item from the form.
             </div>
           ) : (
-            activeItems.map((item) => (
-              <article className="rounded-xl border border-zinc-200 bg-white p-4 shadow-sm" key={item.id}>
-                <div className="flex flex-wrap items-start gap-3">
-                  <div className="h-20 w-20 shrink-0 overflow-hidden rounded-md border border-zinc-200 bg-zinc-50">
-                    {imagePreviewByItemId[item.id]?.[0] ? (
-                      // eslint-disable-next-line @next/next/no-img-element
-                      <img
-                        alt={`${item.title} preview`}
-                        className="h-full w-full object-cover"
-                        src={imagePreviewByItemId[item.id][0]}
-                      />
-                    ) : (
-                      <div className="flex h-full items-center justify-center text-[11px] text-zinc-500">No image</div>
-                    )}
-                  </div>
+            activeItems.map((item) => {
+              const displayPrice = item.priceCents !== null ? `$${(item.priceCents / 100).toFixed(2)}` : null;
+              const summaryParts: string[] = [];
+              if (item.url) summaryParts.push(item.url);
 
-                  <div className="min-w-0 flex-1">
-                    <div className="flex flex-wrap items-start justify-between gap-3">
-                      <div>
-                        <h3 className="text-base font-semibold text-zinc-900">{item.title}</h3>
-                        {item.description ? <p className="mt-1 text-xs text-zinc-700">{item.description}</p> : null}
-                        <p className="mt-1 text-xs text-zinc-600">
-                          {item.url ? item.url : "No product URL"} •{" "}
-                          {item.priceCents !== null ? `$${(item.priceCents / 100).toFixed(2)}` : "No price"}
-                        </p>
-                        <p className="mt-1 text-xs text-zinc-600">
-                          Images: {getItemImageUrls(item).length}/{CLIENT_MAX_ITEM_IMAGES}
-                        </p>
-                        {item.isGroupFunded ? (
-                          <p className="mt-1 text-xs text-zinc-600">
-                            Group-funded target: {item.targetCents !== null ? `$${(item.targetCents / 100).toFixed(2)}` : "Unset"}
-                          </p>
-                        ) : null}
-                      </div>
+              return (
+                <article className="rounded-xl border border-zinc-200 bg-white p-4 shadow-sm" key={item.id}>
+                  <div className="grid gap-3 sm:grid-cols-[5rem_minmax(0,1fr)_auto] sm:items-start">
+                    <div className="h-20 w-20 shrink-0 overflow-hidden rounded-md border border-zinc-200 bg-zinc-50">
+                      {imagePreviewByItemId[item.id]?.[0] ? (
+                        // eslint-disable-next-line @next/next/no-img-element
+                        <img
+                          alt={`${item.title} preview`}
+                          className="h-full w-full object-cover"
+                          src={imagePreviewByItemId[item.id][0]}
+                        />
+                      ) : (
+                        <div className="flex h-full items-center justify-center text-[11px] text-zinc-500">No image</div>
+                      )}
+                    </div>
 
-                      <div className="flex gap-2">
-                        <button
-                          className="rounded-md border border-zinc-300 px-3 py-2 text-sm font-medium text-zinc-800"
-                          onClick={() => startEdit(item)}
-                          type="button"
-                        >
-                          Edit
-                        </button>
-                        <button
-                          className="rounded-md border border-rose-300 px-3 py-2 text-sm font-medium text-rose-800"
-                          onClick={() => onArchive(item.id)}
-                          type="button"
-                        >
-                          Archive
-                        </button>
-                      </div>
+                    <div className="min-w-0">
+                      <h3 className="text-base font-semibold text-zinc-900">{item.title}</h3>
+                      {displayPrice ? <p className="mt-1 text-base font-semibold text-blue-900">{displayPrice}</p> : null}
+                      {item.description ? (
+                        <p className="mt-1 overflow-hidden text-sm text-zinc-700 [display:-webkit-box] [-webkit-box-orient:vertical] [-webkit-line-clamp:3]">
+                          {item.description}
+                        </p>
+                      ) : null}
+                      {summaryParts.length > 0 ? (
+                        <p className="mt-1 truncate text-xs text-zinc-600" title={summaryParts.join(" • ")}>
+                          {summaryParts.join(" • ")}
+                        </p>
+                      ) : null}
+                      {item.isGroupFunded ? (
+                        <p className="mt-1 text-xs text-zinc-600">
+                          Group-funded target: {item.targetCents !== null ? `$${(item.targetCents / 100).toFixed(2)}` : "Unset"}
+                        </p>
+                      ) : null}
+                    </div>
+
+                    <div className="flex shrink-0 gap-2 sm:justify-self-end">
+                      <button
+                        className="rounded-md border border-sky-300 px-3 py-2 text-sm font-medium text-sky-800"
+                        onClick={() => void openItemReview(item)}
+                        type="button"
+                      >
+                        Review
+                      </button>
+                      <button
+                        className="rounded-md border border-zinc-300 px-3 py-2 text-sm font-medium text-zinc-800"
+                        onClick={() => startEdit(item)}
+                        type="button"
+                      >
+                        Edit
+                      </button>
+                      <button
+                        className="rounded-md border border-rose-300 px-3 py-2 text-sm font-medium text-rose-800"
+                        onClick={() => onArchive(item.id)}
+                        type="button"
+                      >
+                        Archive
+                      </button>
                     </div>
                   </div>
-                </div>
-              </article>
-            ))
+                </article>
+              );
+            })
           )}
 
           {archivedItems.length > 0 ? (
@@ -1313,6 +1430,125 @@ export default function WishlistEditorPage() {
           ) : null}
         </section>
       </section>
+
+      {reviewingItem ? (
+        <div
+          className="fixed inset-0 z-[70] flex items-center justify-center bg-zinc-950/45 p-4"
+          onClick={(event) => {
+            if (event.target === event.currentTarget) closeItemReview();
+          }}
+        >
+          <section className="max-h-[92vh] w-full max-w-4xl overflow-hidden rounded-2xl border border-zinc-200 bg-white shadow-xl">
+            <header className="flex items-center justify-between border-b border-zinc-200 px-4 py-3">
+              <h3 className="text-base font-semibold text-zinc-900">Item review</h3>
+              <button
+                className="rounded-md border border-zinc-300 px-2.5 py-1 text-xs font-medium text-zinc-700"
+                onClick={closeItemReview}
+                type="button"
+              >
+                Close
+              </button>
+            </header>
+
+            <div className="grid max-h-[calc(92vh-4.1rem)] gap-4 overflow-y-auto p-4 lg:grid-cols-[1.15fr_1fr]">
+              <div>
+                <div className="overflow-hidden rounded-xl border border-zinc-200 bg-zinc-50">
+                  {isLoadingReviewImages ? (
+                    <div className="h-[320px] animate-pulse bg-zinc-100" />
+                  ) : currentReviewImageUrl ? (
+                    // eslint-disable-next-line @next/next/no-img-element
+                    <img
+                      alt={`${reviewingItem.title} photo ${reviewImageIndex + 1}`}
+                      className="h-[320px] w-full object-contain bg-white"
+                      src={currentReviewImageUrl}
+                    />
+                  ) : (
+                    <div className="flex h-[320px] items-center justify-center text-sm text-zinc-500">No image preview available</div>
+                  )}
+                </div>
+
+                {reviewImageError ? <p className="mt-2 text-xs text-rose-700">{reviewImageError}</p> : null}
+
+                {reviewImageUrls.length > 1 ? (
+                  <>
+                    <div className="mt-3 flex items-center justify-between">
+                      <button
+                        className="rounded-md border border-zinc-300 px-3 py-1.5 text-xs font-medium text-zinc-700"
+                        onClick={() =>
+                          setReviewImageIndex((current) =>
+                            current === 0 ? reviewImageUrls.length - 1 : current - 1,
+                          )
+                        }
+                        type="button"
+                      >
+                        Previous
+                      </button>
+                      <p className="text-xs text-zinc-600">
+                        Photo {reviewImageIndex + 1} of {reviewImageUrls.length}
+                      </p>
+                      <button
+                        className="rounded-md border border-zinc-300 px-3 py-1.5 text-xs font-medium text-zinc-700"
+                        onClick={() =>
+                          setReviewImageIndex((current) =>
+                            current === reviewImageUrls.length - 1 ? 0 : current + 1,
+                          )
+                        }
+                        type="button"
+                      >
+                        Next
+                      </button>
+                    </div>
+
+                    <div className="mt-3 flex flex-wrap gap-2">
+                      {reviewImageUrls.map((url, index) => (
+                        <button
+                          className={`h-14 w-14 overflow-hidden rounded-md border ${
+                            index === reviewImageIndex ? "border-blue-500 ring-1 ring-blue-400" : "border-zinc-200"
+                          }`}
+                          key={`${url}-${index}`}
+                          onClick={() => setReviewImageIndex(index)}
+                          type="button"
+                        >
+                          {/* eslint-disable-next-line @next/next/no-img-element */}
+                          <img alt={`${reviewingItem.title} thumbnail ${index + 1}`} className="h-full w-full object-cover" src={url} />
+                        </button>
+                      ))}
+                    </div>
+                  </>
+                ) : null}
+              </div>
+
+              <div className="space-y-3">
+                <h4 className="text-xl font-semibold text-blue-900">{reviewingItem.title}</h4>
+                {reviewingItem.priceCents !== null ? (
+                  <p className="text-xl font-semibold text-blue-900">${(reviewingItem.priceCents / 100).toFixed(2)}</p>
+                ) : null}
+                {reviewingItem.description ? (
+                  <p className="text-sm leading-6 text-zinc-700 whitespace-pre-wrap">{reviewingItem.description}</p>
+                ) : (
+                  <p className="text-sm text-zinc-500">No description provided.</p>
+                )}
+                {reviewingItem.url ? (
+                  <a
+                    className="block break-all text-sm font-medium text-sky-700 underline underline-offset-2"
+                    href={reviewingItem.url}
+                    rel="noreferrer"
+                    target="_blank"
+                  >
+                    {reviewingItem.url}
+                  </a>
+                ) : null}
+                {reviewingItem.isGroupFunded ? (
+                  <p className="text-sm text-zinc-700">
+                    Group-funded target:{" "}
+                    {reviewingItem.targetCents !== null ? `$${(reviewingItem.targetCents / 100).toFixed(2)}` : "Unset"}
+                  </p>
+                ) : null}
+              </div>
+            </div>
+          </section>
+        </div>
+      ) : null}
     </main>
   );
 }

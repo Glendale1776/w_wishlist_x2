@@ -930,7 +930,7 @@ export async function uploadItemImage(input: {
   };
 }
 
-export function createItemImagePreview(input: { itemId: string; ownerEmail: string }) {
+export function createItemImagePreview(input: { itemId: string; ownerEmail: string; imageIndex?: number }) {
   const store = getStore();
   const item = store.items.find((candidate) => candidate.id === input.itemId);
 
@@ -941,7 +941,9 @@ export function createItemImagePreview(input: { itemId: string; ownerEmail: stri
     return { error: "FORBIDDEN" as CreatePreviewError };
   }
 
-  const candidateRef = getItemImageUrls(item)[0] || null;
+  const imageRefs = getItemImageUrls(item);
+  const requestedIndex = Number.isInteger(input.imageIndex) && input.imageIndex !== undefined && input.imageIndex >= 0 ? input.imageIndex : 0;
+  const candidateRef = imageRefs[requestedIndex] || null;
   if (!candidateRef) {
     return {
       externalUrl: null as string | null,

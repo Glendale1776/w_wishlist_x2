@@ -122,7 +122,7 @@ export async function POST(request: NextRequest) {
     return errorResponse(422, "VALIDATION_ERROR", "Please fix the highlighted fields.", validated.fieldErrors);
   }
 
-  const ownerWishlists = listWishlistRecords({
+  const ownerWishlists = await listWishlistRecords({
     ownerEmail,
     search: "",
     sort: "updated_desc",
@@ -174,7 +174,7 @@ export async function GET(request: NextRequest) {
     });
   }
 
-  const ownerWishlists = listWishlistRecords({
+  const ownerWishlists = await listWishlistRecords({
     ownerEmail,
     search: "",
     sort: "updated_desc",

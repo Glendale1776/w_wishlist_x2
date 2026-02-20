@@ -53,7 +53,7 @@ export async function POST(request: NextRequest, context: { params: Promise<{ wi
   const { wishlist_id } = await context.params;
 
   try {
-    const updated = updateWishlistShareLinkDisabled({
+    const updated = await updateWishlistShareLinkDisabled({
       wishlistId: wishlist_id,
       actorEmail: adminEmail,
       disabled: true,

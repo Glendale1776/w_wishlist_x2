@@ -1,5 +1,9 @@
 import { createHash, randomBytes, randomUUID } from "node:crypto";
 
+import { getSupabaseAdminClient } from "@/app/_lib/supabase-admin";
+
+const EMAIL_REGEX = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+
 export type WishlistRecord = {
   id: string;
   ownerEmail: string;
@@ -46,41 +50,63 @@ type RotationIdempotencyEntry = {
   expiresAt: number;
 };
 
+type WishlistRow = {
+  id: string;
+  owner_id: string;
+  title: string;
+  occasion_date: string | null;
+  occasion_note: string | null;
+  currency: string;
+  share_token_hash: string;
+  share_token_hint: string;
+  share_token_disabled_at: string | null;
+  share_token_rotated_at: string | null;
+  created_at: string;
+  updated_at: string;
+};
+
+type WishlistStoreState = {
+  shareTokensByHash: Record<string, string>;
+  shareLinkAuditEvents: ShareLinkAuditEvent[];
+  rotationIdempotency: RotationIdempotencyEntry[];
+  userIdByEmail: Record<string, string | null>;
+  userEmailById: Record<string, string>;
+};
+
 declare global {
   // eslint-disable-next-line no-var
-  var __wishlistStore:
-    | {
-        wishlists: WishlistRecord[];
-        shareTokensByHash: Record<string, string>;
-        shareLinkAuditEvents: ShareLinkAuditEvent[];
-        rotationIdempotency: RotationIdempotencyEntry[];
-      }
-    | undefined;
+  var __wishlistStore: WishlistStoreState | undefined;
 }
 
-function getStore() {
+function getStore(): WishlistStoreState {
   if (!globalThis.__wishlistStore) {
     globalThis.__wishlistStore = {
-      wishlists: [],
       shareTokensByHash: {},
       shareLinkAuditEvents: [],
       rotationIdempotency: [],
+      userIdByEmail: {},
+      userEmailById: {},
     };
   }
 
-  if (!globalThis.__wishlistStore.shareTokensByHash) {
-    globalThis.__wishlistStore.shareTokensByHash = {};
-  }
-
-  if (!globalThis.__wishlistStore.shareLinkAuditEvents) {
-    globalThis.__wishlistStore.shareLinkAuditEvents = [];
-  }
-
-  if (!globalThis.__wishlistStore.rotationIdempotency) {
-    globalThis.__wishlistStore.rotationIdempotency = [];
-  }
-
   return globalThis.__wishlistStore;
+}
+
+function wishlistSelectColumns() {
+  return [
+    "id",
+    "owner_id",
+    "title",
+    "occasion_date",
+    "occasion_note",
+    "currency",
+    "share_token_hash",
+    "share_token_hint",
+    "share_token_disabled_at",
+    "share_token_rotated_at",
+    "created_at",
+    "updated_at",
+  ].join(",");
 }
 
 function nowIso() {
@@ -148,6 +174,137 @@ function rotationIdempotencyKey(input: { wishlistId: string; ownerEmail: string;
   return `${input.wishlistId}:${input.ownerEmail}:${input.idempotencyKey}`;
 }
 
+function normalizeEmail(value: string | null | undefined): string {
+  return (value || "").trim().toLowerCase();
+}
+
+function mapWishlistRowToRecord(row: WishlistRow, ownerEmail?: string): WishlistRecord {
+  const store = getStore();
+  const normalizedOwnerEmail = normalizeEmail(ownerEmail) || store.userEmailById[row.owner_id] || "";
+
+  if (normalizedOwnerEmail) {
+    store.userEmailById[row.owner_id] = normalizedOwnerEmail;
+    store.userIdByEmail[normalizedOwnerEmail] = row.owner_id;
+  }
+
+  return {
+    id: row.id,
+    ownerEmail: normalizedOwnerEmail,
+    title: row.title,
+    occasionDate: row.occasion_date,
+    occasionNote: row.occasion_note,
+    currency: row.currency,
+    shareTokenHash: row.share_token_hash,
+    shareTokenHint: row.share_token_hint,
+    shareTokenDisabledAt: row.share_token_disabled_at ?? null,
+    shareTokenRotatedAt: row.share_token_rotated_at ?? null,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
+  };
+}
+
+async function resolveOwnerUserId(ownerEmail: string): Promise<string | null> {
+  const normalizedEmail = normalizeEmail(ownerEmail);
+  if (!EMAIL_REGEX.test(normalizedEmail)) return null;
+
+  const store = getStore();
+  if (Object.prototype.hasOwnProperty.call(store.userIdByEmail, normalizedEmail)) {
+    return store.userIdByEmail[normalizedEmail];
+  }
+
+  const supabase = getSupabaseAdminClient();
+  const perPage = 200;
+  let page = 1;
+
+  for (let guard = 0; guard < 200; guard += 1) {
+    const { data, error } = await supabase.auth.admin.listUsers({ page, perPage });
+    if (error) break;
+
+    const users = data?.users || [];
+    const found = users.find((candidate) => normalizeEmail(candidate.email) === normalizedEmail);
+    if (found?.id) {
+      store.userIdByEmail[normalizedEmail] = found.id;
+      store.userEmailById[found.id] = normalizedEmail;
+      return found.id;
+    }
+
+    if (!data?.nextPage || users.length === 0) break;
+    page = data.nextPage;
+  }
+
+  store.userIdByEmail[normalizedEmail] = null;
+  return null;
+}
+
+async function fetchOwnerEmailByUserId(ownerId: string): Promise<string | null> {
+  const store = getStore();
+  if (store.userEmailById[ownerId]) return store.userEmailById[ownerId];
+
+  const supabase = getSupabaseAdminClient();
+  const { data, error } = await supabase.auth.admin.getUserById(ownerId);
+  if (error || !data?.user?.email) return null;
+
+  const normalizedEmail = normalizeEmail(data.user.email);
+  if (!normalizedEmail) return null;
+
+  store.userEmailById[ownerId] = normalizedEmail;
+  store.userIdByEmail[normalizedEmail] = ownerId;
+  return normalizedEmail;
+}
+
+async function findWishlistById(wishlistId: string): Promise<WishlistRow | null> {
+  const supabase = getSupabaseAdminClient();
+  const { data, error } = await supabase
+    .from("wishlists")
+    .select(wishlistSelectColumns())
+    .eq("id", wishlistId)
+    .maybeSingle();
+
+  if (error) {
+    if (error.code === "PGRST116") return null;
+    throw error;
+  }
+
+  if (!data) return null;
+  return data as unknown as WishlistRow;
+}
+
+async function findWishlistByTokenHash(tokenHash: string): Promise<WishlistRow | null> {
+  const supabase = getSupabaseAdminClient();
+  const { data, error } = await supabase
+    .from("wishlists")
+    .select(wishlistSelectColumns())
+    .eq("share_token_hash", tokenHash)
+    .maybeSingle();
+
+  if (error) {
+    if (error.code === "PGRST116") return null;
+    throw error;
+  }
+
+  if (!data) return null;
+  return data as unknown as WishlistRow;
+}
+
+async function findWishlistByTokenHint(tokenHint: string): Promise<WishlistRow | null> {
+  const supabase = getSupabaseAdminClient();
+  const { data, error } = await supabase
+    .from("wishlists")
+    .select(wishlistSelectColumns())
+    .eq("share_token_hint", tokenHint)
+    .order("updated_at", { ascending: false })
+    .limit(1)
+    .maybeSingle();
+
+  if (error) {
+    if (error.code === "PGRST116") return null;
+    throw error;
+  }
+
+  if (!data) return null;
+  return data as unknown as WishlistRow;
+}
+
 export function normalizeCanonicalHost(raw: string | undefined): string {
   const host = raw?.trim() || "https://design.rhcargo.ru";
   return host.replace(/\/$/, "");
@@ -157,8 +314,9 @@ export function buildPublicShareUrl(host: string, tokenOrHint: string): string {
   return `${host}/l/${tokenOrHint}`;
 }
 
-export function createWishlistRecord(input: {
+export async function createWishlistRecord(input: {
   ownerEmail: string;
+  ownerId?: string;
   title: string;
   occasionDate: string | null;
   occasionNote: string | null;
@@ -167,31 +325,43 @@ export function createWishlistRecord(input: {
   shareTokenBytes?: number;
   shareTokenPepper?: string;
 }) {
+  const ownerEmail = normalizeEmail(input.ownerEmail);
+  const ownerId = input.ownerId?.trim() || (await resolveOwnerUserId(ownerEmail));
+  if (!ownerId) {
+    throw new Error("OWNER_NOT_FOUND");
+  }
+
   const canonicalHost = normalizeCanonicalHost(input.canonicalHost);
   const pepper = normalizeShareTokenPepper(input.shareTokenPepper ?? process.env.SHARE_TOKEN_PEPPER);
   const token = createShareToken(input.shareTokenBytes ?? parsePositiveInt(process.env.SHARE_TOKEN_BYTES, 24));
   const tokenHash = hashShareToken(token, pepper);
   const tokenHint = token.slice(0, 8);
-  const timestamp = nowIso();
 
-  const record: WishlistRecord = {
-    id: randomUUID(),
-    ownerEmail: input.ownerEmail,
-    title: input.title,
-    occasionDate: input.occasionDate,
-    occasionNote: input.occasionNote,
-    currency: input.currency,
-    shareTokenHash: tokenHash,
-    shareTokenHint: tokenHint,
-    shareTokenDisabledAt: null,
-    shareTokenRotatedAt: null,
-    createdAt: timestamp,
-    updatedAt: timestamp,
-  };
+  const supabase = getSupabaseAdminClient();
+  const { data, error } = await supabase
+    .from("wishlists")
+    .insert({
+      owner_id: ownerId,
+      title: input.title,
+      occasion_date: input.occasionDate,
+      occasion_note: input.occasionNote,
+      currency: input.currency,
+      share_token_hash: tokenHash,
+      share_token_hint: tokenHint,
+      share_token_disabled_at: null,
+      share_token_rotated_at: null,
+    })
+    .select(wishlistSelectColumns())
+    .single();
+
+  if (error || !data) {
+    throw error || new Error("Unable to create wishlist.");
+  }
 
   const store = getStore();
-  store.wishlists.unshift(record);
   store.shareTokensByHash[tokenHash] = token;
+
+  const record = mapWishlistRowToRecord(data as unknown as WishlistRow, ownerEmail);
 
   return {
     record,
@@ -200,114 +370,132 @@ export function createWishlistRecord(input: {
   };
 }
 
-export function listWishlistRecords(input: {
+export async function listWishlistRecords(input: {
   ownerEmail: string;
+  ownerId?: string;
   search: string;
   sort: WishlistSort;
   canonicalHost?: string;
-}): WishlistListItem[] {
+}): Promise<WishlistListItem[]> {
+  const ownerEmail = normalizeEmail(input.ownerEmail);
+  const ownerId = input.ownerId?.trim() || (await resolveOwnerUserId(ownerEmail));
+  if (!ownerId) return [];
+
   const canonicalHost = normalizeCanonicalHost(input.canonicalHost);
-  const needle = input.search.trim().toLowerCase();
-  const store = getStore();
+  const needle = input.search.trim();
 
-  const filtered = store.wishlists.filter((item) => {
-    if (item.ownerEmail !== input.ownerEmail) return false;
-    if (!needle) return true;
-    return item.title.toLowerCase().includes(needle);
-  });
+  const supabase = getSupabaseAdminClient();
+  let query = supabase.from("wishlists").select(wishlistSelectColumns()).eq("owner_id", ownerId);
 
-  if (input.sort === "title_asc") {
-    filtered.sort((a, b) => a.title.localeCompare(b.title));
-  } else {
-    filtered.sort((a, b) => new Date(b.updatedAt).getTime() - new Date(a.updatedAt).getTime());
+  if (needle) {
+    query = query.ilike("title", `%${needle}%`);
   }
 
-  return filtered.map((item) => ({
-    shareUrlPreview: buildPublicShareUrl(
-      canonicalHost,
-      store.shareTokensByHash[item.shareTokenHash] || item.shareTokenHint,
-    ),
-    id: item.id,
-    title: item.title,
-    occasionDate: item.occasionDate,
-    occasionNote: item.occasionNote,
-    currency: item.currency,
-    updatedAt: item.updatedAt,
+  if (input.sort === "title_asc") {
+    query = query.order("title", { ascending: true }).order("updated_at", { ascending: false });
+  } else {
+    query = query.order("updated_at", { ascending: false });
+  }
+
+  const { data, error } = await query;
+  if (error) {
+    throw error;
+  }
+
+  const rows = (data || []) as unknown as WishlistRow[];
+  const store = getStore();
+
+  return rows.map((row) => ({
+    shareUrlPreview: buildPublicShareUrl(canonicalHost, store.shareTokensByHash[row.share_token_hash] || row.share_token_hint),
+    id: row.id,
+    title: row.title,
+    occasionDate: row.occasion_date,
+    occasionNote: row.occasion_note,
+    currency: row.currency,
+    updatedAt: row.updated_at,
   }));
 }
 
 export type ResolvePublicWishlistError = "NOT_FOUND" | "DISABLED";
 
-export function resolvePublicWishlistByToken(
+export async function resolvePublicWishlistByToken(
   token: string,
   options?: {
     shareTokenPepper?: string;
   },
-): { wishlist: WishlistRecord } | { error: ResolvePublicWishlistError } {
+): Promise<{ wishlist: WishlistRecord } | { error: ResolvePublicWishlistError }> {
   const normalizedToken = token.trim();
   if (!normalizedToken) {
     return { error: "NOT_FOUND" as ResolvePublicWishlistError };
   }
 
-  const store = getStore();
   const pepper = normalizeShareTokenPepper(options?.shareTokenPepper ?? process.env.SHARE_TOKEN_PEPPER);
 
   const primaryHash = hashShareToken(normalizedToken, pepper);
-  let record = store.wishlists.find((wishlist) => wishlist.shareTokenHash === primaryHash);
+  let row = await findWishlistByTokenHash(primaryHash);
 
-  if (!record && pepper) {
+  if (!row && pepper) {
     // Legacy fallback for tokens created before SHARE_TOKEN_PEPPER was introduced.
     const legacyHash = hashShareToken(normalizedToken, "");
-    record = store.wishlists.find((wishlist) => wishlist.shareTokenHash === legacyHash);
+    row = await findWishlistByTokenHash(legacyHash);
   }
 
-  if (!record) {
-    record = store.wishlists.find((wishlist) => wishlist.shareTokenHint === normalizedToken);
+  if (!row) {
+    row = await findWishlistByTokenHint(normalizedToken);
   }
 
-  if (!record) {
+  if (!row) {
     return { error: "NOT_FOUND" as ResolvePublicWishlistError };
   }
 
-  if (record.shareTokenDisabledAt) {
+  if (row.share_token_disabled_at) {
     return { error: "DISABLED" as ResolvePublicWishlistError };
   }
 
-  return { wishlist: record };
+  return { wishlist: mapWishlistRowToRecord(row) };
 }
 
-export function getWishlistRecordById(wishlistId: string): WishlistRecord | null {
-  const store = getStore();
-  const found = store.wishlists.find((wishlist) => wishlist.id === wishlistId);
-  return found || null;
+export async function getWishlistRecordById(wishlistId: string): Promise<WishlistRecord | null> {
+  const row = await findWishlistById(wishlistId);
+  if (!row) return null;
+
+  const ownerEmail = await fetchOwnerEmailByUserId(row.owner_id);
+  return mapWishlistRowToRecord(row, ownerEmail || undefined);
 }
 
-export function getPublicShareTokenForWishlist(wishlistId: string): string | null {
+export async function getPublicShareTokenForWishlist(wishlistId: string): Promise<string | null> {
+  const row = await findWishlistById(wishlistId);
+  if (!row) return null;
   const store = getStore();
-  const found = store.wishlists.find((wishlist) => wishlist.id === wishlistId);
-  if (!found) return null;
-  return store.shareTokensByHash[found.shareTokenHash] || found.shareTokenHint;
+  return store.shareTokensByHash[row.share_token_hash] || row.share_token_hint;
 }
 
 export type RotateShareLinkError = "NOT_FOUND" | "FORBIDDEN";
 
-export function rotateWishlistShareLink(input: {
+export async function rotateWishlistShareLink(input: {
   wishlistId: string;
   ownerEmail: string;
+  ownerId?: string;
   canonicalHost?: string;
   shareTokenBytes?: number;
   shareTokenPepper?: string;
   idempotencyKey?: string;
   idempotencyTtlSec?: number;
 }) {
+  const ownerEmail = normalizeEmail(input.ownerEmail);
+  const ownerId = input.ownerId?.trim() || (await resolveOwnerUserId(ownerEmail));
+  if (!ownerId) {
+    return { error: "FORBIDDEN" as RotateShareLinkError };
+  }
+
   const store = getStore();
-  const found = store.wishlists.find((wishlist) => wishlist.id === input.wishlistId);
+  const found = await findWishlistById(input.wishlistId);
 
   if (!found) {
     return { error: "NOT_FOUND" as RotateShareLinkError };
   }
 
-  if (found.ownerEmail !== input.ownerEmail) {
+  if (found.owner_id !== ownerId) {
     return { error: "FORBIDDEN" as RotateShareLinkError };
   }
 
@@ -320,7 +508,7 @@ export function rotateWishlistShareLink(input: {
 
     const key = rotationIdempotencyKey({
       wishlistId: input.wishlistId,
-      ownerEmail: input.ownerEmail,
+      ownerEmail,
       idempotencyKey: safeIdempotencyKey,
     });
 
@@ -329,7 +517,7 @@ export function rotateWishlistShareLink(input: {
       return {
         ok: true as const,
         alreadyProcessed: true as const,
-        rotatedAt: found.shareTokenRotatedAt,
+        rotatedAt: found.share_token_rotated_at,
       };
     }
 
@@ -340,27 +528,42 @@ export function rotateWishlistShareLink(input: {
     });
   }
 
-  const previousHash = found.shareTokenHash;
+  const previousHash = found.share_token_hash;
 
   const token = createShareToken(input.shareTokenBytes ?? parsePositiveInt(process.env.SHARE_TOKEN_BYTES, 24));
   const tokenHash = hashShareToken(token, pepper);
   const tokenHint = token.slice(0, 8);
   const timestamp = nowIso();
 
-  found.shareTokenHash = tokenHash;
-  found.shareTokenHint = tokenHint;
-  found.shareTokenRotatedAt = timestamp;
-  found.updatedAt = timestamp;
+  const supabase = getSupabaseAdminClient();
+  const { data, error } = await supabase
+    .from("wishlists")
+    .update({
+      share_token_hash: tokenHash,
+      share_token_hint: tokenHint,
+      share_token_rotated_at: timestamp,
+      updated_at: timestamp,
+    })
+    .eq("id", found.id)
+    .eq("owner_id", ownerId)
+    .select(wishlistSelectColumns())
+    .single();
+
+  if (error || !data) {
+    throw error || new Error("Unable to rotate share link.");
+  }
 
   delete store.shareTokensByHash[previousHash];
   store.shareTokensByHash[tokenHash] = token;
 
+  const updatedRecord = mapWishlistRowToRecord(data as unknown as WishlistRow, ownerEmail);
+
   const auditEvent = createShareLinkAuditEvent({
-    wishlistId: found.id,
-    actorEmail: input.ownerEmail,
+    wishlistId: updatedRecord.id,
+    actorEmail: ownerEmail,
     action: "rotate_share_link",
-    tokenHint,
-    disabledAt: found.shareTokenDisabledAt,
+    tokenHint: updatedRecord.shareTokenHint,
+    disabledAt: updatedRecord.shareTokenDisabledAt,
     createdAt: timestamp,
   });
 
@@ -376,46 +579,64 @@ export function rotateWishlistShareLink(input: {
 
 export type UpdateShareLinkDisabledError = "NOT_FOUND";
 
-export function updateWishlistShareLinkDisabled(input: {
+export async function updateWishlistShareLinkDisabled(input: {
   wishlistId: string;
   actorEmail: string;
   disabled: boolean;
 }) {
-  const store = getStore();
-  const found = store.wishlists.find((wishlist) => wishlist.id === input.wishlistId);
+  const found = await findWishlistById(input.wishlistId);
   if (!found) {
     return { error: "NOT_FOUND" as UpdateShareLinkDisabledError };
   }
 
-  const wasDisabled = Boolean(found.shareTokenDisabledAt);
+  const wasDisabled = Boolean(found.share_token_disabled_at);
   const alreadyApplied = input.disabled ? wasDisabled : !wasDisabled;
+
+  const ownerEmail = await fetchOwnerEmailByUserId(found.owner_id);
+  const ownerRecord = mapWishlistRowToRecord(found, ownerEmail || undefined);
 
   if (alreadyApplied) {
     return {
       ok: true as const,
       alreadyApplied: true as const,
-      wishlist: found,
+      wishlist: ownerRecord,
       auditEventId: null as string | null,
     };
   }
 
   const timestamp = nowIso();
-  found.shareTokenDisabledAt = input.disabled ? timestamp : null;
-  found.updatedAt = timestamp;
+  const disabledAt = input.disabled ? timestamp : null;
+
+  const supabase = getSupabaseAdminClient();
+  const { data, error } = await supabase
+    .from("wishlists")
+    .update({
+      share_token_disabled_at: disabledAt,
+      updated_at: timestamp,
+    })
+    .eq("id", found.id)
+    .select(wishlistSelectColumns())
+    .single();
+
+  if (error || !data) {
+    throw error || new Error("Unable to update share link status.");
+  }
+
+  const updated = mapWishlistRowToRecord(data as unknown as WishlistRow, ownerEmail || undefined);
 
   const auditEvent = createShareLinkAuditEvent({
-    wishlistId: found.id,
-    actorEmail: input.actorEmail,
+    wishlistId: updated.id,
+    actorEmail: normalizeEmail(input.actorEmail),
     action: input.disabled ? "disable_share_link" : "enable_share_link",
-    tokenHint: found.shareTokenHint,
-    disabledAt: found.shareTokenDisabledAt,
+    tokenHint: updated.shareTokenHint,
+    disabledAt: updated.shareTokenDisabledAt,
     createdAt: timestamp,
   });
 
   return {
     ok: true as const,
     alreadyApplied: false as const,
-    wishlist: found,
+    wishlist: updated,
     auditEventId: auditEvent.id,
   };
 }
@@ -456,20 +677,30 @@ export function pruneShareLinkAuditEvents(input: { retentionDays: number }) {
 
 export type DeleteWishlistError = "NOT_FOUND" | "FORBIDDEN";
 
-export function deleteWishlistRecord(input: { wishlistId: string; ownerEmail: string }) {
-  const store = getStore();
-  const index = store.wishlists.findIndex((wishlist) => wishlist.id === input.wishlistId);
-  if (index === -1) {
-    return { error: "NOT_FOUND" as DeleteWishlistError };
-  }
-
-  const found = store.wishlists[index];
-  if (found.ownerEmail !== input.ownerEmail) {
+export async function deleteWishlistRecord(input: { wishlistId: string; ownerEmail: string; ownerId?: string }) {
+  const ownerEmail = normalizeEmail(input.ownerEmail);
+  const ownerId = input.ownerId?.trim() || (await resolveOwnerUserId(ownerEmail));
+  if (!ownerId) {
     return { error: "FORBIDDEN" as DeleteWishlistError };
   }
 
-  store.wishlists.splice(index, 1);
-  delete store.shareTokensByHash[found.shareTokenHash];
+  const found = await findWishlistById(input.wishlistId);
+  if (!found) {
+    return { error: "NOT_FOUND" as DeleteWishlistError };
+  }
+
+  if (found.owner_id !== ownerId) {
+    return { error: "FORBIDDEN" as DeleteWishlistError };
+  }
+
+  const supabase = getSupabaseAdminClient();
+  const { error } = await supabase.from("wishlists").delete().eq("id", found.id).eq("owner_id", ownerId);
+  if (error) {
+    throw error;
+  }
+
+  const store = getStore();
+  delete store.shareTokensByHash[found.share_token_hash];
   store.shareLinkAuditEvents = store.shareLinkAuditEvents.filter((event) => event.wishlistId !== found.id);
   store.rotationIdempotency = store.rotationIdempotency.filter((entry) => !entry.key.startsWith(`${found.id}:`));
 

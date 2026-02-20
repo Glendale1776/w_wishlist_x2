@@ -48,7 +48,7 @@ export function GlobalHeader() {
         <nav
           className={
             isAuthenticated
-              ? "ml-auto flex flex-wrap items-end justify-end gap-x-6 gap-y-1 sm:gap-x-10"
+              ? "ml-auto flex flex-wrap items-center justify-end gap-x-6 gap-y-1 sm:gap-x-10"
               : "ml-auto flex flex-wrap items-center gap-2"
           }
         >
@@ -60,14 +60,14 @@ export function GlobalHeader() {
               <Link className={`header-nav-link ${isActivityActive ? "header-nav-link--active" : ""}`} href="/me/activity">
                 My activity
               </Link>
-              <div className="flex flex-col items-end">
-                <span className="header-nav-account-badge" title={email || undefined}>
-                  {email}
-                </span>
-                <button className="header-nav-link header-nav-link--danger" onClick={() => void handleSignOut()} type="button">
-                  Log out
-                </button>
-              </div>
+              <button
+                className="header-nav-link header-nav-link--danger header-nav-link--logout"
+                onClick={() => void handleSignOut()}
+                title={email || undefined}
+                type="button"
+              >
+                {`Log out ${email ?? ""}`}
+              </button>
             </>
           ) : (
             <>

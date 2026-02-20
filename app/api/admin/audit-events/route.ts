@@ -148,8 +148,8 @@ export async function GET(request: NextRequest) {
     .slice(0, limit);
 
   const wishlist = wishlistId
-    ? (() => {
-        const found = getWishlistRecordById(wishlistId);
+    ? await (async () => {
+        const found = await getWishlistRecordById(wishlistId);
         if (!found) return null;
         return {
           id: found.id,

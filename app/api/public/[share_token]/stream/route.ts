@@ -2,7 +2,7 @@ import { NextResponse } from "next/server";
 
 import { resolvePublicWishlistReadModel } from "@/app/_lib/public-wishlist";
 
-const DEFAULT_STREAM_HEARTBEAT_SEC = 15;
+const DEFAULT_STREAM_HEARTBEAT_SEC = 5;
 const DEFAULT_RECONNECT_WINDOW_SEC = 120;
 
 type ApiErrorCode = "NOT_FOUND";
@@ -30,6 +30,7 @@ type StreamMessage =
         isGroupFunded: boolean;
         targetCents: number | null;
         fundedCents: number;
+        contributorCount: number;
         progressRatio: number;
         availability: "available" | "reserved";
       }>;

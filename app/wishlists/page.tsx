@@ -366,11 +366,7 @@ function WishlistsContent() {
               <button
                 aria-expanded={isFiltersOpen}
                 aria-haspopup="dialog"
-                className={`rounded-full border px-3 py-1.5 text-xs font-medium transition ${
-                  hasActiveFilters
-                    ? "border-sky-300 bg-sky-50 text-sky-900"
-                    : "border-zinc-300 bg-white/80 text-zinc-700 hover:bg-white"
-                }`}
+                className={`btn-notch min-w-[10.5rem] ${hasActiveFilters ? "btn-notch--ink" : ""}`}
                 onClick={() => setIsFiltersOpen((current) => !current)}
                 type="button"
               >
@@ -464,7 +460,14 @@ function WishlistsContent() {
               <article className="border-b border-zinc-300/80 px-2 pb-5 pt-2 last:border-b-0 sm:px-3" key={item.id}>
                 <div className="flex flex-wrap items-start justify-between gap-3">
                   <div>
-                    <h2 className="text-base font-semibold text-zinc-900">{item.title}</h2>
+                    <h2 className="text-base font-semibold">
+                      <Link
+                        className="text-zinc-900 underline-offset-2 transition hover:text-blue-900 hover:underline"
+                        href={`/wishlists/${item.id}`}
+                      >
+                        {item.title}
+                      </Link>
+                    </h2>
                     <p className="mt-1 text-xs text-zinc-600">
                       {item.occasionDate ? `Occasion date: ${item.occasionDate}` : "No occasion date"}
                     </p>
@@ -548,9 +551,6 @@ function WishlistsContent() {
                     <button className="btn-notch" onClick={() => startEditingWishlist(item)} type="button">
                       Edit details
                     </button>
-                    <Link className="btn-notch" href={`/wishlists/${item.id}`}>
-                      Open editor
-                    </Link>
                     <button
                       className="btn-notch btn-notch--ink"
                       onClick={() => copyShareLink(item.shareUrlPreview)}

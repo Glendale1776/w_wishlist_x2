@@ -17,6 +17,7 @@ export type PublicWishlistItem = {
   isGroupFunded: boolean;
   targetCents: number | null;
   fundedCents: number;
+  contributorCount: number;
   progressRatio: number;
   availability: "available" | "reserved";
 };

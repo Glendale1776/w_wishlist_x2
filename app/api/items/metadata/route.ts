@@ -9,9 +9,12 @@ const DEFAULT_OPENAI_TIMEOUT_MS = 9000;
 const DEFAULT_OPENAI_MODEL = "gpt-4o-mini";
 const MAX_TEXT_CHARS = 12_000;
 const MAX_IMAGE_CANDIDATES = 30;
-const MAX_IMAGE_RETURN = 8;
+const MAX_IMAGE_RETURN = 10;
 const TITLE_MAX = 120;
 const DESCRIPTION_MAX = 600;
+const TITLE_WORD_MAX = 6;
+const DESCRIPTION_BULLET_MAX = 5;
+const DESCRIPTION_BULLET_LINE_MAX = 120;
 const AMAZON_HOST_REGEX = /(^|\.)amazon\./i;
 
 function errorResponse(status: number, code: string, message: string, fieldErrors?: Record<string, string>) {
@@ -339,6 +342,105 @@ function cleanDescription(value: string | null): string | null {
   return trimmed.slice(0, DESCRIPTION_MAX);
 }
 
+function trimWords(value: string, maxWords: number): string {
+  const words = value
+    .trim()
+    .split(/\s+/)
+    .filter(Boolean);
+
+  if (words.length <= maxWords) return words.join(" ");
+  return words.slice(0, maxWords).join(" ");
+}
+
+function buildConciseTitle(value: string | null): string | null {
+  const cleaned = cleanTitle(value);
+  if (!cleaned) return null;
+
+  const withoutMarketplaceSuffix = cleaned
+    .replace(/\s*[|:]\s*(amazon|amazon\.com|ikea|walmart|target)\b.*$/i, "")
+    .trim();
+  const concise = trimWords(withoutMarketplaceSuffix || cleaned, TITLE_WORD_MAX);
+  return cleanTitle(concise);
+}
+
+function normalizeBulletLine(value: string): string | null {
+  const normalized = value
+    .replace(/^\s*(?:[-*•●▪◦]|\d+[.)])\s*/, "")
+    .replace(/\s+/g, " ")
+    .trim();
+
+  if (!normalized) return null;
+  return normalized.slice(0, DESCRIPTION_BULLET_LINE_MAX);
+}
+
+function featureCandidatesFromText(value: string | null): string[] {
+  if (!value) return [];
+  const normalized = value.replace(/\r/g, "\n").trim();
+  if (!normalized) return [];
+
+  const fromLines = normalized
+    .split(/\n+/)
+    .map((line) => normalizeBulletLine(line))
+    .filter((line): line is string => Boolean(line));
+
+  if (fromLines.length >= 2) return fromLines;
+
+  const fromSentences = normalized
+    .split(/(?<=[.!?])\s+/)
+    .map((line) => normalizeBulletLine(line))
+    .filter((line): line is string => Boolean(line));
+
+  return fromSentences;
+}
+
+function buildConciseBulletedDescription(input: {
+  prioritySpecNotes: string | null;
+  aiBullets: string[];
+  aiDescription: string | null;
+  fallbackDescription: string | null;
+}): string | null {
+  const collected: string[] = [];
+  const seen = new Set<string>();
+
+  const pushCandidate = (value: string | null) => {
+    if (!value) return;
+    const normalized = normalizeBulletLine(value);
+    if (!normalized) return;
+    const dedupeKey = normalized.toLowerCase();
+    if (seen.has(dedupeKey)) return;
+    seen.add(dedupeKey);
+    collected.push(normalized);
+  };
+
+  for (const candidate of featureCandidatesFromText(input.prioritySpecNotes)) {
+    pushCandidate(candidate);
+    if (collected.length >= DESCRIPTION_BULLET_MAX) break;
+  }
+
+  for (const bullet of input.aiBullets) {
+    pushCandidate(bullet);
+    if (collected.length >= DESCRIPTION_BULLET_MAX) break;
+  }
+
+  if (collected.length < DESCRIPTION_BULLET_MAX) {
+    for (const candidate of featureCandidatesFromText(input.aiDescription)) {
+      pushCandidate(candidate);
+      if (collected.length >= DESCRIPTION_BULLET_MAX) break;
+    }
+  }
+
+  if (collected.length < DESCRIPTION_BULLET_MAX) {
+    for (const candidate of featureCandidatesFromText(input.fallbackDescription)) {
+      pushCandidate(candidate);
+      if (collected.length >= DESCRIPTION_BULLET_MAX) break;
+    }
+  }
+
+  if (collected.length === 0) return null;
+  const bulleted = collected.slice(0, DESCRIPTION_BULLET_MAX).map((line) => `• ${line}`).join("\n");
+  return cleanDescription(bulleted);
+}
+
 function looksLikeMarketplaceOnlyText(value: string | null, parsed: URL): boolean {
   const normalized = (value || "").trim().toLowerCase();
   if (!normalized) return true;
@@ -623,6 +725,7 @@ function fallbackMetadata(html: string, pageUrl: URL) {
 type AiMetadata = {
   title: string | null;
   description: string | null;
+  descriptionBullets: string[];
   price: number | null;
   imageUrls: string[];
 };
@@ -656,6 +759,9 @@ function parseAiMetadata(content: string): AiMetadata | null {
     return {
       title: typeof parsed.title === "string" ? parsed.title : null,
       description: typeof parsed.description === "string" ? parsed.description : null,
+      descriptionBullets: Array.isArray(parsed.descriptionBullets)
+        ? parsed.descriptionBullets.filter((value): value is string => typeof value === "string")
+        : [],
       price: typeof parsed.price === "number" ? parsed.price : null,
       imageUrls: Array.isArray(parsed.imageUrls)
         ? parsed.imageUrls.filter((value): value is string => typeof value === "string")
@@ -672,6 +778,7 @@ async function inferMetadataWithOpenAi(input: {
   openAiTimeoutMs: number;
   sourceUrl: string;
   pageText: string;
+  prioritySpecNotes: string | null;
   candidateImageUrls: string[];
   fallbackTitle: string | null;
   fallbackDescription: string | null;
@@ -702,6 +809,11 @@ async function inferMetadataWithOpenAi(input: {
               properties: {
                 title: { type: ["string", "null"] },
                 description: { type: ["string", "null"] },
+                descriptionBullets: {
+                  type: "array",
+                  items: { type: "string" },
+                  maxItems: DESCRIPTION_BULLET_MAX,
+                },
                 price: { type: ["number", "null"] },
                 imageUrls: {
                   type: "array",
@@ -709,7 +821,7 @@ async function inferMetadataWithOpenAi(input: {
                   maxItems: MAX_IMAGE_RETURN,
                 },
               },
-              required: ["title", "description", "price", "imageUrls"],
+              required: ["title", "description", "descriptionBullets", "price", "imageUrls"],
             },
           },
         },
@@ -717,12 +829,13 @@ async function inferMetadataWithOpenAi(input: {
           {
             role: "system",
             content:
-              "Extract product metadata from the provided webpage data. Return null for unknown fields. Do not invent facts. For imageUrls, prefer actual product photos from candidateImageUrls and choose highest-resolution variants (avoid thumbnails/sprites/icons). For price, return the exact product price with cents as shown on the page; never round (19.99 must stay 19.99). Ignore shipping, coupons, monthly payments, and accessory prices.",
+              "Extract product metadata from the provided webpage data. Return null for unknown fields. Do not invent facts. Rewrite title to concise wording with at most 6 words. Rewrite description as up to 5 concise key-feature bullets in descriptionBullets (no marketing fluff, no store/about-brand text). If prioritySpecNotes is present, treat it as strict user requirements, keep those details first in descriptionBullets, and do not contradict or remove them. For imageUrls, prefer actual product photos from candidateImageUrls and choose highest-resolution variants (avoid thumbnails/sprites/icons). For price, return the exact product price with cents as shown on the page; never round (19.99 must stay 19.99). Ignore shipping, coupons, monthly payments, and accessory prices.",
           },
           {
             role: "user",
             content: JSON.stringify({
               url: input.sourceUrl,
+              prioritySpecNotes: input.prioritySpecNotes,
               titleHint: input.fallbackTitle,
               descriptionHint: input.fallbackDescription,
               priceHintCents: input.fallbackPriceCents,
@@ -774,8 +887,9 @@ export async function POST(request: NextRequest) {
     return errorResponse(401, "AUTH_REQUIRED", "Sign in is required to fetch metadata.");
   }
 
-  const payload = (await request.json().catch(() => null)) as { url?: string } | null;
+  const payload = (await request.json().catch(() => null)) as { url?: string; specNotes?: string } | null;
   const urlValue = payload?.url?.trim() || "";
+  const specNotes = typeof payload?.specNotes === "string" ? payload.specNotes.trim() : "";
 
   if (!urlValue || !URL_REGEX.test(urlValue)) {
     return errorResponse(422, "VALIDATION_ERROR", "Please provide a valid http/https URL.", {
@@ -882,6 +996,7 @@ export async function POST(request: NextRequest) {
       openAiTimeoutMs: Number.isFinite(openAiTimeoutMs) && openAiTimeoutMs > 0 ? openAiTimeoutMs : DEFAULT_OPENAI_TIMEOUT_MS,
       sourceUrl: parsed.toString(),
       pageText: sourceText,
+      prioritySpecNotes: specNotes || null,
       candidateImageUrls,
       fallbackTitle: titleHint,
       fallbackDescription: descriptionHint,
@@ -900,16 +1015,24 @@ export async function POST(request: NextRequest) {
       aiMetadata && aiMetadata.imageUrls.length > 0
         ? rankCandidateImageUrls(normalizeImageUrls(aiMetadata.imageUrls, parsed), parsed)
         : [];
-    const mergedImageUrls = normalizeImageUrls(
-      aiImageUrls.length > 0 ? aiImageUrls : candidateImageUrls,
+    const mergedImageUrls = rankCandidateImageUrls(
+      normalizeImageUrls([...aiImageUrls, ...candidateImageUrls], parsed),
       parsed,
     ).slice(0, MAX_IMAGE_RETURN);
 
     const fallbackTitle = titleHint || titleFromPathSlug(parsed);
-    const title = pickBestTitle(sanitizeMarketplaceTitle(aiMetadata?.title || null, parsed), fallbackTitle);
+    const selectedTitle = pickBestTitle(
+      sanitizeMarketplaceTitle(aiMetadata?.title || null, parsed),
+      fallbackTitle,
+    );
+    const title = buildConciseTitle(selectedTitle);
 
-    const rawDescription = aiMetadata?.description || descriptionHint;
-    const description = looksLikeMarketplaceOnlyText(rawDescription, parsed) ? null : cleanDescription(rawDescription);
+    const description = buildConciseBulletedDescription({
+      prioritySpecNotes: specNotes || null,
+      aiBullets: aiMetadata?.descriptionBullets || [],
+      aiDescription: aiMetadata?.description || null,
+      fallbackDescription: descriptionHint,
+    });
 
     const textExtractedPriceCents = extractPriceCentsFromText(sourceText);
     const baselinePriceCents = priceHintCents ?? textExtractedPriceCents;

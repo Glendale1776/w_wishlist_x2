@@ -176,7 +176,7 @@ export async function POST(request: NextRequest, context: { params: Promise<{ sh
     });
   }
 
-  const mutation = contributeToPublicItem({
+  const mutation = await contributeToPublicItem({
     wishlistId: resolvedWishlist.wishlist.id,
     itemId,
     actorEmail,
@@ -186,6 +186,10 @@ export async function POST(request: NextRequest, context: { params: Promise<{ sh
   if ("error" in mutation) {
     if (mutation.error === "NOT_FOUND") {
       return errorResponse(404, "NOT_FOUND", "Item not found.");
+    }
+
+    if (mutation.error === "ACTOR_NOT_FOUND") {
+      return errorResponse(401, "AUTH_REQUIRED", "Sign in is required for this action.");
     }
 
     if (mutation.error === "INVALID_AMOUNT") {

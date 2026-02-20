@@ -99,6 +99,31 @@ type WishlistsListResponse =
       };
     };
 
+type ItemAvailability = "available" | "reserved";
+
+type OwnerRealtimeMessage =
+  | {
+      type: "snapshot";
+      items: Array<{
+        id: string;
+        title: string;
+        availability: ItemAvailability;
+        fundedCents: number;
+        contributorCount: number;
+      }>;
+    }
+  | {
+      type: "heartbeat";
+    }
+  | {
+      type: "not_found";
+    };
+
+type ItemContributionSummary = {
+  fundedCents: number;
+  contributorCount: number;
+};
+
 type PendingImage = {
   id: string;
   file: File;
@@ -133,6 +158,52 @@ function parseMoneyToCents(value: string): number | null {
   return Math.round(asNumber * 100);
 }
 
+function normalizeDescriptionLine(value: string) {
+  return value
+    .replace(/^\s*(?:[-*•●▪◦]|\d+[.)])\s*/, "")
+    .replace(/\s+/g, " ")
+    .trim()
+    .toLowerCase();
+}
+
+function splitDescriptionLines(value: string): string[] {
+  const normalized = value.replace(/\r/g, "\n").trim();
+  if (!normalized) return [];
+  return normalized
+    .split(/\n+/)
+    .map((line) => line.trim())
+    .filter(Boolean);
+}
+
+function mergeDescriptionWithPriority(userNotes: string, importedDescription: string | null | undefined) {
+  const preferredNotes = userNotes.trim();
+  const imported = (importedDescription || "").trim();
+
+  if (!preferredNotes) return imported;
+  if (!imported) return preferredNotes;
+
+  const merged: string[] = [];
+  const seen = new Set<string>();
+
+  const pushLine = (line: string) => {
+    const trimmed = line.trim();
+    if (!trimmed) return;
+    const dedupeKey = normalizeDescriptionLine(trimmed);
+    if (!dedupeKey || seen.has(dedupeKey)) return;
+    seen.add(dedupeKey);
+    merged.push(trimmed);
+  };
+
+  for (const line of splitDescriptionLines(preferredNotes)) {
+    pushLine(line);
+  }
+  for (const line of splitDescriptionLines(imported)) {
+    pushLine(line);
+  }
+
+  return merged.join("\n");
+}
+
 function buildPayload(wishlistId: string, form: ItemFormValues) {
   const priceCents = parseMoneyToCents(form.price);
   const targetCents = parseMoneyToCents(form.target);
@@ -154,6 +225,27 @@ function createIdempotencyKey() {
     return crypto.randomUUID();
   }
   return `${Date.now()}-${Math.random().toString(36).slice(2)}`;
+}
+
+function extractShareTokenFromPreview(value: string | null): string | null {
+  if (!value) return null;
+  const trimmed = value.trim();
+  if (!trimmed) return null;
+
+  try {
+    const fallbackOrigin = typeof window !== "undefined" ? window.location.origin : "http://localhost";
+    const parsed = new URL(trimmed, fallbackOrigin);
+    const parts = parsed.pathname.split("/").filter(Boolean);
+    const tokenIndex = parts.findIndex((part) => part === "l");
+    if (tokenIndex >= 0 && parts[tokenIndex + 1]) {
+      return decodeURIComponent(parts[tokenIndex + 1]);
+    }
+    return parts.length > 0 ? decodeURIComponent(parts[parts.length - 1]) : null;
+  } catch {
+    const match = trimmed.match(/\/l\/([^/?#]+)/i);
+    if (match?.[1]) return decodeURIComponent(match[1]);
+    return null;
+  }
 }
 
 function isStorageImageRef(value: string | null | undefined) {
@@ -236,6 +328,9 @@ export default function WishlistEditorPage() {
   const [shareUrlPreview, setShareUrlPreview] = useState<string | null>(null);
   const [shareLinkMessage, setShareLinkMessage] = useState<string | null>(null);
   const [shareLinkError, setShareLinkError] = useState<string | null>(null);
+  const [availabilityByItemId, setAvailabilityByItemId] = useState<Record<string, ItemAvailability>>({});
+  const [contributionByItemId, setContributionByItemId] = useState<Record<string, ItemContributionSummary>>({});
+  const [reservationLiveNotice, setReservationLiveNotice] = useState<string | null>(null);
 
   const [editingItemId, setEditingItemId] = useState<string | null>(null);
   const [form, setForm] = useState<ItemFormValues>(EMPTY_FORM);
@@ -246,6 +341,7 @@ export default function WishlistEditorPage() {
   const [priceReviewNotice, setPriceReviewNotice] = useState<string | null>(null);
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [isFetchingMetadata, setIsFetchingMetadata] = useState(false);
+  const [isRestoringItemId, setIsRestoringItemId] = useState<string | null>(null);
 
   const [pendingImages, setPendingImages] = useState<PendingImage[]>([]);
   const [imagePreviewByItemId, setImagePreviewByItemId] = useState<Record<string, string[]>>({});
@@ -261,13 +357,29 @@ export default function WishlistEditorPage() {
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const pendingImagesRef = useRef<PendingImage[]>([]);
   const reviewLoadTokenRef = useRef<string | null>(null);
+  const availabilityByItemIdRef = useRef<Record<string, ItemAvailability>>({});
+  const reservationNoticeTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const activeItems = useMemo(() => items.filter((item) => !item.archivedAt), [items]);
   const archivedItems = useMemo(() => items.filter((item) => Boolean(item.archivedAt)), [items]);
+  const activeReservedCount = useMemo(
+    () =>
+      activeItems.reduce((count, item) => (availabilityByItemId[item.id] === "reserved" ? count + 1 : count), 0),
+    [activeItems, availabilityByItemId],
+  );
   const reviewingItem = useMemo(
     () => items.find((item) => item.id === reviewingItemId) || null,
     [items, reviewingItemId],
   );
+  const reviewingContributionSummary = useMemo(() => {
+    if (!reviewingItem) return null;
+    return (
+      contributionByItemId[reviewingItem.id] || {
+        fundedCents: reviewingItem.fundedCents,
+        contributorCount: reviewingItem.contributorCount,
+      }
+    );
+  }, [contributionByItemId, reviewingItem]);
 
   const duplicateUrlWarning = useMemo(() => {
     const normalized = form.url.trim().toLowerCase();
@@ -371,6 +483,114 @@ export default function WishlistEditorPage() {
   }, [router, wishlistId]);
 
   useEffect(() => {
+    const shareToken = extractShareTokenFromPreview(shareUrlPreview);
+    if (!shareToken) {
+      availabilityByItemIdRef.current = {};
+      setAvailabilityByItemId({});
+      setContributionByItemId({});
+      setReservationLiveNotice(null);
+      return;
+    }
+
+    let cancelled = false;
+    let source: EventSource | null = null;
+    let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
+
+    const clearReconnect = () => {
+      if (!reconnectTimer) return;
+      clearTimeout(reconnectTimer);
+      reconnectTimer = null;
+    };
+
+    const connect = () => {
+      if (cancelled) return;
+
+      if (source) {
+        source.close();
+        source = null;
+      }
+
+      source = new EventSource(`/api/public/${encodeURIComponent(shareToken)}/stream`);
+
+      source.onmessage = (event) => {
+        if (cancelled) return;
+
+        let message: OwnerRealtimeMessage;
+        try {
+          message = JSON.parse(event.data) as OwnerRealtimeMessage;
+        } catch {
+          return;
+        }
+
+        if (message.type !== "snapshot") return;
+
+        const previous = availabilityByItemIdRef.current;
+        const next: Record<string, ItemAvailability> = {};
+        const nextContributions: Record<string, ItemContributionSummary> = {};
+        let newlyReservedTitle: string | null = null;
+
+        for (const item of message.items) {
+          next[item.id] = item.availability;
+          nextContributions[item.id] = {
+            fundedCents: item.fundedCents,
+            contributorCount: item.contributorCount,
+          };
+          if (item.availability === "reserved" && previous[item.id] !== "reserved" && !newlyReservedTitle) {
+            newlyReservedTitle = item.title;
+          }
+        }
+
+        availabilityByItemIdRef.current = next;
+        setAvailabilityByItemId(next);
+        setContributionByItemId(nextContributions);
+
+        if (newlyReservedTitle) {
+          setReservationLiveNotice(`Reserved now: ${newlyReservedTitle}`);
+          if (reservationNoticeTimerRef.current) {
+            clearTimeout(reservationNoticeTimerRef.current);
+          }
+          reservationNoticeTimerRef.current = setTimeout(() => {
+            setReservationLiveNotice(null);
+            reservationNoticeTimerRef.current = null;
+          }, 2400);
+        }
+      };
+
+      source.onerror = () => {
+        if (cancelled) return;
+
+        if (source) {
+          source.close();
+          source = null;
+        }
+
+        if (!reconnectTimer) {
+          reconnectTimer = setTimeout(() => {
+            reconnectTimer = null;
+            connect();
+          }, 3000);
+        }
+      };
+    };
+
+    connect();
+
+    return () => {
+      cancelled = true;
+      clearReconnect();
+      if (source) source.close();
+    };
+  }, [shareUrlPreview]);
+
+  useEffect(() => {
+    return () => {
+      if (reservationNoticeTimerRef.current) {
+        clearTimeout(reservationNoticeTimerRef.current);
+      }
+    };
+  }, []);
+
+  useEffect(() => {
     let cancelled = false;
 
     async function hydratePreviews() {
@@ -470,6 +690,15 @@ export default function WishlistEditorPage() {
     });
   }
 
+  function removeDraftImageAt(index: number) {
+    setForm((current) => ({
+      ...current,
+      imageUrls: current.imageUrls.filter((_, imageIndex) => imageIndex !== index),
+    }));
+    setImageMessage(editingItemId ? "Image removed from draft. Save item to apply changes." : "Image removed from draft.");
+    setFieldErrors((current) => ({ ...current, imageFile: undefined, imageUrls: undefined }));
+  }
+
   function resetForm() {
     setEditingItemId(null);
     setForm(EMPTY_FORM);
@@ -518,19 +747,44 @@ export default function WishlistEditorPage() {
     return requestPreview();
   }
 
-  async function hydratePreviewForItem(itemId: string) {
+  async function hydratePreviewForItem(itemId: string, imageRefsOverride?: string[]) {
     const ownerEmail = await getAuthenticatedEmail();
     if (!ownerEmail) return;
 
-    const previewUrl = await fetchSignedPreviewUrl({
-      itemId,
-      ownerEmail,
-    });
+    const fallbackItem = items.find((item) => item.id === itemId) || null;
+    const imageRefs =
+      imageRefsOverride && imageRefsOverride.length > 0
+        ? imageRefsOverride
+        : fallbackItem
+          ? getItemImageUrls(fallbackItem)
+          : [];
+
+    if (imageRefs.length === 0) {
+      setImagePreviewByItemId((current) => {
+        const next = { ...current };
+        delete next[itemId];
+        return next;
+      });
+      return;
+    }
+
+    const previewUrls = await Promise.all(
+      imageRefs.map(async (imageRef, imageIndex) => {
+        if (!isStorageImageRef(imageRef)) return imageRef;
+        const previewUrl = await fetchSignedPreviewUrl({
+          itemId,
+          ownerEmail,
+          imageIndex,
+        });
+        return previewUrl || "";
+      }),
+    );
+    const hasAtLeastOnePreview = previewUrls.some((value) => Boolean(value));
 
     setImagePreviewByItemId((current) => {
       const next = { ...current };
-      if (previewUrl) {
-        next[itemId] = [previewUrl];
+      if (hasAtLeastOnePreview) {
+        next[itemId] = previewUrls;
       } else {
         delete next[itemId];
       }
@@ -623,8 +877,8 @@ export default function WishlistEditorPage() {
     setUploadProgress(0);
 
     const imageRefs = getItemImageUrls(item);
-    if (imageRefs.length > 0 && isStorageImageRef(imageRefs[0])) {
-      void hydratePreviewForItem(item.id);
+    if (imageRefs.length > 0) {
+      void hydratePreviewForItem(item.id, imageRefs);
     }
 
     window.scrollTo({ top: 0, behavior: "smooth" });
@@ -779,7 +1033,7 @@ export default function WishlistEditorPage() {
 
     setItems((current) => current.map((item) => (item.id === uploadResult.item.id ? uploadResult.item : item)));
     setForm((current) => ({ ...current, imageUrls: getItemImageUrls(uploadResult.item) }));
-    await hydratePreviewForItem(itemId);
+    await hydratePreviewForItem(itemId, getItemImageUrls(uploadResult.item));
     setUploadProgress(100);
     setImageMessage("Image uploaded.");
 
@@ -901,7 +1155,7 @@ export default function WishlistEditorPage() {
         queuedImages.length === 1 ? "1 image uploaded." : `${queuedImages.length} images uploaded.`,
       );
     } else if (primaryImageRef && isStorageImageRef(primaryImageRef)) {
-      await hydratePreviewForItem(result.item.id);
+      await hydratePreviewForItem(result.item.id, currentImageUrls);
     }
 
     setIsSubmitting(false);
@@ -938,6 +1192,44 @@ export default function WishlistEditorPage() {
 
     setItems((current) => current.map((item) => (item.id === payload.item.id ? payload.item : item)));
     setFormSuccess("Item archived.");
+  }
+
+  async function onRestore(itemId: string) {
+    const ownerEmail = await getAuthenticatedEmail();
+    if (!ownerEmail) {
+      persistReturnTo(`/wishlists/${wishlistId}`);
+      router.replace(`/login?returnTo=${encodeURIComponent(`/wishlists/${wishlistId}`)}`);
+      return;
+    }
+
+    setIsRestoringItemId(itemId);
+
+    let response: Response;
+    try {
+      response = await fetch(`/api/items/${itemId}/archive`, {
+        method: "DELETE",
+        headers: {
+          "x-owner-email": ownerEmail,
+        },
+      });
+    } catch {
+      setIsRestoringItemId(null);
+      setFormError("Unable to restore item right now.");
+      return;
+    }
+
+    const payload = (await response.json()) as ItemApiResponse;
+    setIsRestoringItemId(null);
+
+    if (!response.ok || !payload.ok) {
+      const message = payload && !payload.ok ? payload.error.message : "Unable to restore item.";
+      setFormError(message);
+      return;
+    }
+
+    setItems((current) => current.map((item) => (item.id === payload.item.id ? payload.item : item)));
+    setFormSuccess("Item restored to wishlist.");
+    closeItemReview();
   }
 
   async function copyShareLink(value: string) {
@@ -977,7 +1269,10 @@ export default function WishlistEditorPage() {
           "content-type": "application/json",
           "x-owner-email": ownerEmail,
         },
-        body: JSON.stringify({ url: form.url.trim() }),
+        body: JSON.stringify({
+          url: form.url.trim(),
+          specNotes: form.description.trim() || null,
+        }),
       });
     } catch {
       setIsFetchingMetadata(false);
@@ -1031,7 +1326,7 @@ export default function WishlistEditorPage() {
       return {
         ...prev,
         title: payload.metadata.title || prev.title,
-        description: payload.metadata.description || prev.description,
+        description: mergeDescriptionWithPriority(prev.description, payload.metadata.description),
         imageUrls: nextImageUrls,
         price: priceFromMeta,
         target: nextTarget,
@@ -1046,10 +1341,16 @@ export default function WishlistEditorPage() {
         : "Imported price may be inaccurate. Please verify it before saving.");
 
     setPriceReviewNotice(needsPriceReview ? reviewMessage : null);
+    const importedImageCount = Array.isArray(payload.metadata.imageUrls)
+      ? payload.metadata.imageUrls.filter((value) => (value || "").trim().length > 0).length
+      : payload.metadata.imageUrl
+        ? 1
+        : 0;
+
     setMetadataMessage(
       needsPriceReview
-        ? "AI autofill complete. Please check the price before saving."
-        : "AI autofill complete. Review fields before saving.",
+        ? `AI autofill complete. Imported ${Math.min(importedImageCount, CLIENT_MAX_ITEM_IMAGES)} image(s). Your notes stayed first. Please check the price before saving.`
+        : `AI autofill complete. Imported ${Math.min(importedImageCount, CLIENT_MAX_ITEM_IMAGES)} image(s). Your notes stayed first. Review fields before saving.`,
     );
   }
 
@@ -1158,9 +1459,10 @@ export default function WishlistEditorPage() {
       </header>
       {shareLinkError ? <p className="mt-2 text-sm text-rose-700">{shareLinkError}</p> : null}
       {shareLinkMessage ? <p className="mt-2 text-sm text-emerald-700">{shareLinkMessage}</p> : null}
+      {reservationLiveNotice ? <p className="mt-2 text-sm font-medium text-emerald-700">{reservationLiveNotice}</p> : null}
 
-      <section className="mt-6 grid gap-6 lg:grid-cols-[1fr_1.2fr]">
-        <aside className="rounded-2xl border border-zinc-200 bg-white p-5 shadow-sm">
+      <section className="mt-6 grid items-start gap-6 lg:grid-cols-[1fr_1.2fr]">
+        <aside className="self-start p-1">
           <div className="flex items-center justify-between">
             <h2 className="text-lg font-semibold">{editingItemId ? "Edit item" : "Add item"}</h2>
             {editingItemId ? (
@@ -1184,43 +1486,53 @@ export default function WishlistEditorPage() {
               {fieldErrors.title ? <p className="mt-1 text-xs text-rose-700">{fieldErrors.title}</p> : null}
             </div>
 
-            <div>
-              <label className="mb-1 block text-sm font-medium text-zinc-800" htmlFor="item-description">
-                Item description
-              </label>
-              <textarea
-                className="min-h-24 w-full rounded-md border border-zinc-300 px-3 py-2 text-sm outline-none focus:border-zinc-500"
-                id="item-description"
-                onChange={(event) => setForm((prev) => ({ ...prev, description: event.target.value }))}
-                placeholder="Add crucial requirements like preferred color, size, and specific model details."
-                value={form.description}
-              />
-              {fieldErrors.description ? <p className="mt-1 text-xs text-rose-700">{fieldErrors.description}</p> : null}
-            </div>
+            <section className="rounded-xl border border-sky-100 bg-sky-50/40 p-3 sm:p-4">
+              <p className="text-xs font-semibold uppercase tracking-[0.18em] text-sky-700">Description + URL import</p>
+              <p className="mt-1 text-xs leading-5 text-zinc-600">
+                Add must-have specs in <strong>Item description</strong> first (color, size, model). Then paste a product
+                link and import. Your notes stay first, imported details are added after.
+              </p>
 
-            <div>
-              <label className="mb-1 block text-sm font-medium text-zinc-800" htmlFor="item-url">
-                Product URL
-              </label>
-              <input
-                className="w-full rounded-md border border-zinc-300 px-3 py-2 text-sm outline-none focus:border-zinc-500"
-                id="item-url"
-                onChange={(event) => setForm((prev) => ({ ...prev, url: event.target.value }))}
-                value={form.url}
-              />
-              <button
-                className="btn-notch btn-notch--ink mt-2 w-full"
-                disabled={isFetchingMetadata}
-                onClick={onAutofillFromUrl}
-                type="button"
-              >
-                {isFetchingMetadata ? "Importing from URL..." : "One-click import from URL"}
-              </button>
-              {fieldErrors.url ? <p className="mt-1 text-xs text-rose-700">{fieldErrors.url}</p> : null}
-              {duplicateUrlWarning ? (
-                <p className="mt-1 text-xs text-amber-700">Duplicate URL detected in this wishlist. You can still save.</p>
-              ) : null}
-            </div>
+              <div className="mt-3">
+                <label className="mb-1 block text-sm font-medium text-zinc-800" htmlFor="item-description">
+                  Item description
+                </label>
+                <textarea
+                  className="min-h-24 w-full rounded-md border border-zinc-300 px-3 py-2 text-sm outline-none focus:border-zinc-500"
+                  id="item-description"
+                  onChange={(event) => setForm((prev) => ({ ...prev, description: event.target.value }))}
+                  placeholder="Example: Orange color, 256 GB, unlocked version."
+                  value={form.description}
+                />
+                {fieldErrors.description ? <p className="mt-1 text-xs text-rose-700">{fieldErrors.description}</p> : null}
+              </div>
+
+              <div className="mt-3">
+                <label className="mb-1 block text-sm font-medium text-zinc-800" htmlFor="item-url">
+                  Product URL
+                </label>
+                <input
+                  className="w-full rounded-md border border-zinc-300 px-3 py-2 text-sm outline-none focus:border-zinc-500"
+                  id="item-url"
+                  onChange={(event) => setForm((prev) => ({ ...prev, url: event.target.value }))}
+                  value={form.url}
+                />
+                <button
+                  className="btn-notch btn-notch--ink mt-2 w-full"
+                  disabled={isFetchingMetadata}
+                  onClick={onAutofillFromUrl}
+                  type="button"
+                >
+                  {isFetchingMetadata ? "Importing from URL..." : "One-click import from URL"}
+                </button>
+                {fieldErrors.url ? <p className="mt-1 text-xs text-rose-700">{fieldErrors.url}</p> : null}
+                {duplicateUrlWarning ? (
+                  <p className="mt-1 text-xs text-amber-700">
+                    Duplicate URL detected in this wishlist. You can still save.
+                  </p>
+                ) : null}
+              </div>
+            </section>
 
             <div className="grid gap-3 sm:grid-cols-2">
               <div>
@@ -1249,6 +1561,15 @@ export default function WishlistEditorPage() {
                 />
                 {fieldErrors.priceCents ? <p className="mt-1 text-xs text-rose-700">{fieldErrors.priceCents}</p> : null}
                 {priceReviewNotice ? <p className="mt-1 text-xs text-amber-700">{priceReviewNotice}</p> : null}
+
+                <label className="mt-3 flex items-center gap-2 text-sm text-zinc-800">
+                  <input
+                    checked={form.isGroupFunded}
+                    onChange={(event) => onToggleGroupFunded(event.target.checked)}
+                    type="checkbox"
+                  />
+                  <span>Group funded item</span>
+                </label>
               </div>
 
               <div className="rounded-md border border-zinc-200 bg-zinc-50 p-3">
@@ -1298,21 +1619,82 @@ export default function WishlistEditorPage() {
                   {activeImageCount}/{CLIENT_MAX_ITEM_IMAGES} images selected. PNG, JPG, WEBP, or GIF up to 10 MB each.
                 </p>
 
+                {form.imageUrls.length > 0 ? (
+                  <div className="mt-2">
+                    <p className="mb-1 text-[11px] font-medium uppercase tracking-[0.08em] text-zinc-500">
+                      Saved and imported
+                    </p>
+                    <ul className="grid grid-cols-5 gap-2">
+                      {form.imageUrls.map((imageUrl, index) => {
+                        const thumbnailUrl = isStorageImageRef(imageUrl)
+                          ? editingItemId
+                            ? imagePreviewByItemId[editingItemId]?.[index] || null
+                            : null
+                          : imageUrl;
+
+                        return (
+                          <li className="group relative" key={`${imageUrl}-${index}`}>
+                            <div className="h-11 w-11 overflow-hidden rounded-md border border-zinc-200 bg-white">
+                              {thumbnailUrl ? (
+                                // eslint-disable-next-line @next/next/no-img-element
+                                <img
+                                  alt={`Item image ${index + 1}`}
+                                  className="h-full w-full object-cover"
+                                  src={thumbnailUrl}
+                                />
+                              ) : (
+                                <div className="flex h-full w-full items-center justify-center text-[10px] text-zinc-500">
+                                  IMG
+                                </div>
+                              )}
+                            </div>
+                            <button
+                              aria-label={`Delete image ${index + 1}`}
+                              className="absolute -right-1 -top-1 flex h-5 w-5 items-center justify-center rounded-full border border-rose-300 bg-white text-[10px] font-bold text-rose-700 opacity-0 shadow-sm transition-opacity group-hover:opacity-100 group-focus-within:opacity-100"
+                              onClick={() => removeDraftImageAt(index)}
+                              title="Delete image"
+                              type="button"
+                            >
+                              ×
+                            </button>
+                          </li>
+                        );
+                      })}
+                    </ul>
+                  </div>
+                ) : null}
+
                 {pendingImages.length > 0 ? (
-                  <ul className="mt-2 space-y-1 rounded-md border border-zinc-200 bg-white p-2 text-xs text-zinc-700">
-                    {pendingImages.map((pendingImage) => (
-                      <li className="flex items-center justify-between gap-2" key={pendingImage.id}>
-                        <span className="truncate">{pendingImage.file.name}</span>
-                        <button
-                          className="rounded border border-zinc-300 px-2 py-0.5 font-medium text-zinc-700"
-                          onClick={() => removePendingImage(pendingImage.id)}
-                          type="button"
-                        >
-                          Remove
-                        </button>
-                      </li>
-                    ))}
-                  </ul>
+                  <div className="mt-2">
+                    <p className="mb-1 text-[11px] font-medium uppercase tracking-[0.08em] text-zinc-500">
+                      Pending upload
+                    </p>
+                    <ul className="grid grid-cols-5 gap-2">
+                      {pendingImages.map((pendingImage, index) => (
+                        <li className="group relative" key={pendingImage.id}>
+                          <div className="h-11 w-11 overflow-hidden rounded-md border border-zinc-200 bg-white">
+                            {
+                              // eslint-disable-next-line @next/next/no-img-element
+                              <img
+                                alt={`Pending image ${index + 1}`}
+                                className="h-full w-full object-cover"
+                                src={pendingImage.previewUrl}
+                              />
+                            }
+                          </div>
+                          <button
+                            aria-label={`Delete pending image ${index + 1}`}
+                            className="absolute -right-1 -top-1 flex h-5 w-5 items-center justify-center rounded-full border border-rose-300 bg-white text-[10px] font-bold text-rose-700 opacity-0 shadow-sm transition-opacity group-hover:opacity-100 group-focus-within:opacity-100"
+                            onClick={() => removePendingImage(pendingImage.id)}
+                            title="Delete image"
+                            type="button"
+                          >
+                            ×
+                          </button>
+                        </li>
+                      ))}
+                    </ul>
+                  </div>
                 ) : null}
 
                 {isUploadingImage ? (
@@ -1328,15 +1710,6 @@ export default function WishlistEditorPage() {
                 {imageMessage ? <p className="mt-2 text-xs text-zinc-700">{imageMessage}</p> : null}
               </div>
             </div>
-
-            <label className="flex items-center gap-2 rounded-lg border border-zinc-200 p-3 text-sm text-zinc-800">
-              <input
-                checked={form.isGroupFunded}
-                onChange={(event) => onToggleGroupFunded(event.target.checked)}
-                type="checkbox"
-              />
-              <span>Group funded item</span>
-            </label>
 
             {form.isGroupFunded ? (
               <div>
@@ -1369,7 +1742,14 @@ export default function WishlistEditorPage() {
         </aside>
 
         <section className="space-y-4">
-          <h2 className="text-lg font-semibold">Items</h2>
+          <div className="flex flex-wrap items-center justify-between gap-2">
+            <h2 className="text-lg font-semibold">Items</h2>
+            {activeItems.length > 0 ? (
+              <p className="text-sm font-medium text-zinc-700">
+                {activeReservedCount} of {activeItems.length} reserved
+              </p>
+            ) : null}
+          </div>
 
           {isLoading ? (
             <>
@@ -1387,6 +1767,13 @@ export default function WishlistEditorPage() {
               const displayPrice = item.priceCents !== null ? `$${(item.priceCents / 100).toFixed(2)}` : null;
               const summaryParts: string[] = [];
               if (item.url) summaryParts.push(item.url);
+              const liveAvailability = availabilityByItemId[item.id];
+              const contributionSummary = contributionByItemId[item.id] || {
+                fundedCents: item.fundedCents,
+                contributorCount: item.contributorCount,
+              };
+              const fundedDisplay = `$${(contributionSummary.fundedCents / 100).toFixed(2)}`;
+              const contributorLabel = contributionSummary.contributorCount === 1 ? "person" : "people";
 
               return (
                 <article className="rounded-xl border border-zinc-200 bg-white p-4 shadow-sm" key={item.id}>
@@ -1405,18 +1792,30 @@ export default function WishlistEditorPage() {
                     </div>
 
                     <div className="min-w-0 sm:col-start-2 sm:col-end-3">
-                      <h3 className="text-base font-semibold text-zinc-900">{item.title}</h3>
+                      <h3 className="text-base font-semibold">
+                        <button
+                          className="text-left text-zinc-900 underline-offset-2 transition hover:text-blue-900 hover:underline"
+                          onClick={() => void openItemReview(item)}
+                          type="button"
+                        >
+                          {item.title}
+                        </button>
+                      </h3>
                       {displayPrice ? <p className="mt-1 text-base font-semibold text-blue-900">{displayPrice}</p> : null}
+                      {liveAvailability ? (
+                        <p
+                          className={`mt-2 inline-flex rounded-full px-2.5 py-1 text-xs font-semibold ${
+                            liveAvailability === "reserved"
+                              ? "bg-amber-100 text-amber-800"
+                              : "bg-emerald-100 text-emerald-800"
+                          }`}
+                        >
+                          {liveAvailability === "reserved" ? "Reserved" : "Available"}
+                        </p>
+                      ) : null}
                     </div>
 
                     <div className="flex shrink-0 gap-2 sm:justify-self-end">
-                      <button
-                        className="rounded-md border border-sky-300 px-3 py-2 text-sm font-medium text-sky-800"
-                        onClick={() => void openItemReview(item)}
-                        type="button"
-                      >
-                        Review
-                      </button>
                       <button
                         className="rounded-md border border-zinc-300 px-3 py-2 text-sm font-medium text-zinc-800"
                         onClick={() => startEdit(item)}
@@ -1445,9 +1844,14 @@ export default function WishlistEditorPage() {
                         </p>
                       ) : null}
                       {item.isGroupFunded ? (
-                        <p className="mt-1 text-xs text-zinc-600">
-                          Group-funded target: {item.targetCents !== null ? `$${(item.targetCents / 100).toFixed(2)}` : "Unset"}
-                        </p>
+                        <>
+                          <p className="mt-1 text-xs text-zinc-600">
+                            Group-funded target: {item.targetCents !== null ? `$${(item.targetCents / 100).toFixed(2)}` : "Unset"}
+                          </p>
+                          <p className="mt-1 text-xs text-zinc-700">
+                            Contributed: {fundedDisplay} by {contributionSummary.contributorCount} {contributorLabel}
+                          </p>
+                        </>
                       ) : null}
                     </div>
                   </div>
@@ -1459,9 +1863,17 @@ export default function WishlistEditorPage() {
           {archivedItems.length > 0 ? (
             <div className="rounded-xl border border-zinc-200 bg-zinc-50 p-4">
               <h3 className="text-sm font-semibold text-zinc-900">Archived items</h3>
-              <ul className="mt-2 space-y-2 text-sm text-zinc-700">
+              <ul className="mt-2 list-disc space-y-2 pl-5 text-sm text-zinc-700">
                 {archivedItems.map((item) => (
-                  <li key={item.id}>{item.title}</li>
+                  <li key={item.id}>
+                    <button
+                      className="text-left underline-offset-2 transition hover:text-blue-900 hover:underline"
+                      onClick={() => void openItemReview(item)}
+                      type="button"
+                    >
+                      {item.title}
+                    </button>
+                  </li>
                 ))}
               </ul>
             </div>
@@ -1478,14 +1890,33 @@ export default function WishlistEditorPage() {
         >
           <section className="max-h-[92vh] w-full max-w-4xl overflow-hidden rounded-2xl border border-zinc-200 bg-white shadow-xl">
             <header className="flex items-center justify-between border-b border-zinc-200 px-4 py-3">
-              <h3 className="text-base font-semibold text-zinc-900">Item review</h3>
-              <button
-                className="rounded-md border border-zinc-300 px-2.5 py-1 text-xs font-medium text-zinc-700"
-                onClick={closeItemReview}
-                type="button"
-              >
-                Close
-              </button>
+              <div className="flex items-center gap-2">
+                <h3 className="text-base font-semibold text-zinc-900">Item review</h3>
+                {reviewingItem.archivedAt ? (
+                  <span className="rounded-full bg-zinc-200 px-2 py-0.5 text-[11px] font-semibold uppercase tracking-[0.08em] text-zinc-700">
+                    Archived
+                  </span>
+                ) : null}
+              </div>
+              <div className="flex items-center gap-2">
+                {reviewingItem.archivedAt ? (
+                  <button
+                    className="rounded-md border border-emerald-300 px-2.5 py-1 text-xs font-medium text-emerald-800"
+                    disabled={isRestoringItemId === reviewingItem.id}
+                    onClick={() => void onRestore(reviewingItem.id)}
+                    type="button"
+                  >
+                    {isRestoringItemId === reviewingItem.id ? "Restoring..." : "Put back to wishlist"}
+                  </button>
+                ) : null}
+                <button
+                  className="rounded-md border border-zinc-300 px-2.5 py-1 text-xs font-medium text-zinc-700"
+                  onClick={closeItemReview}
+                  type="button"
+                >
+                  Close
+                </button>
+              </div>
             </header>
 
             <div className="grid max-h-[calc(92vh-4.1rem)] gap-4 overflow-y-auto p-4 lg:grid-cols-[1.15fr_1fr]">
@@ -1577,10 +2008,17 @@ export default function WishlistEditorPage() {
                   </a>
                 ) : null}
                 {reviewingItem.isGroupFunded ? (
-                  <p className="text-sm text-zinc-700">
-                    Group-funded target:{" "}
-                    {reviewingItem.targetCents !== null ? `$${(reviewingItem.targetCents / 100).toFixed(2)}` : "Unset"}
-                  </p>
+                  <div className="space-y-1 text-sm text-zinc-700">
+                    <p>
+                      Group-funded target:{" "}
+                      {reviewingItem.targetCents !== null ? `$${(reviewingItem.targetCents / 100).toFixed(2)}` : "Unset"}
+                    </p>
+                    <p>
+                      Contributed: ${((reviewingContributionSummary?.fundedCents || 0) / 100).toFixed(2)} by{" "}
+                      {reviewingContributionSummary?.contributorCount || 0}{" "}
+                      {(reviewingContributionSummary?.contributorCount || 0) === 1 ? "person" : "people"}
+                    </p>
+                  </div>
                 ) : null}
               </div>
             </div>

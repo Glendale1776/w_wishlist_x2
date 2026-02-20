@@ -34,7 +34,7 @@ export async function GET(request: NextRequest) {
 
   const wishlistIdFilter = request.nextUrl.searchParams.get("wishlistId")?.trim() || null;
 
-  const rows = listActivityForActor({ actorEmail });
+  const rows = await listActivityForActor({ actorEmail });
 
   const filteredRows = rows.filter((row) => (wishlistIdFilter ? row.wishlistId === wishlistIdFilter : true));
   const activities = await Promise.all(
@@ -54,8 +54,13 @@ export async function GET(request: NextRequest) {
         itemTitle: row.itemTitle,
         amountCents: row.amountCents,
         status: row.status,
+        openCount: row.openCount,
         happenedAt: row.happenedAt,
-        openItemPath: shareToken ? `/l/${shareToken}?item=${row.itemId}` : null,
+        openItemPath: shareToken
+          ? row.itemId
+            ? `/l/${shareToken}?item=${row.itemId}`
+            : `/l/${shareToken}`
+          : null,
       };
     }),
   );

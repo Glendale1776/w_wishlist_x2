@@ -1,5 +1,6 @@
 import { createHash, randomUUID } from "node:crypto";
 
+import { processArchivedReservationNotifications } from "@/app/_lib/archive-alerts";
 import { getSupabaseAdminClient, getSupabaseStorageBucket } from "@/app/_lib/supabase-admin";
 import { listWishlistRecords } from "@/app/_lib/wishlist-store";
 
@@ -15,6 +16,8 @@ export type ItemRecord = {
   imageUrls: string[];
   isGroupFunded: boolean;
   targetCents: number | null;
+  fundedCents: number;
+  contributorCount: number;
   archivedAt: string | null;
   createdAt: string;
   updatedAt: string;
@@ -44,6 +47,23 @@ type ReservationRow = {
   status: "active" | "released";
   created_at: string;
   updated_at: string;
+};
+
+type ContributionRow = {
+  id: string;
+  item_id: string;
+  user_id: string;
+  amount_cents: number;
+  created_at: string;
+};
+
+type WishlistOpenRow = {
+  id: string;
+  wishlist_id: string;
+  user_id: string;
+  first_opened_at: string;
+  last_opened_at: string;
+  open_count: number;
 };
 
 export type ItemAuditAction = "create" | "update" | "archive" | "reserve" | "unreserve" | "contribute";
@@ -145,7 +165,7 @@ export type ResolvePreviewError = "INVALID_PREVIEW_TOKEN" | "NOT_FOUND";
 
 export type ReservationMutationError = "NOT_FOUND" | "ARCHIVED" | "ALREADY_RESERVED" | "NO_ACTIVE_RESERVATION" | "ACTOR_NOT_FOUND";
 
-export type ContributionMutationError = "NOT_FOUND" | "ARCHIVED" | "NOT_GROUP_FUNDED" | "INVALID_AMOUNT";
+export type ContributionMutationError = "NOT_FOUND" | "ARCHIVED" | "NOT_GROUP_FUNDED" | "INVALID_AMOUNT" | "ACTOR_NOT_FOUND";
 
 export type PublicItemReadModel = {
   id: string;
@@ -157,6 +177,7 @@ export type PublicItemReadModel = {
   isGroupFunded: boolean;
   targetCents: number | null;
   fundedCents: number;
+  contributorCount: number;
   progressRatio: number;
   availability: "available" | "reserved";
   updatedAt: string;
@@ -164,13 +185,14 @@ export type PublicItemReadModel = {
 
 export type ActivityEntry = {
   id: string;
-  kind: "reservation" | "contribution";
-  action: "reserved" | "unreserved" | "contributed";
+  kind: "reservation" | "contribution" | "visit";
+  action: "reserved" | "unreserved" | "contributed" | "opened_wishlist";
   wishlistId: string;
-  itemId: string;
-  itemTitle: string;
+  itemId: string | null;
+  itemTitle: string | null;
   amountCents: number | null;
   status: "active" | "released" | null;
+  openCount: number | null;
   happenedAt: string;
 };
 
@@ -276,6 +298,14 @@ function reservationSelectColumns() {
   return ["id", "wishlist_id", "item_id", "user_id", "status", "created_at", "updated_at"].join(",");
 }
 
+function contributionSelectColumns() {
+  return ["id", "item_id", "user_id", "amount_cents", "created_at"].join(",");
+}
+
+function wishlistOpenSelectColumns() {
+  return ["id", "wishlist_id", "user_id", "first_opened_at", "last_opened_at", "open_count"].join(",");
+}
+
 async function resolveActorUserId(actorEmail: string): Promise<string | null> {
   const normalizedEmail = normalizeEmail(actorEmail);
   if (!EMAIL_REGEX.test(normalizedEmail)) return null;
@@ -322,6 +352,8 @@ function mapItemRowToRecord(row: ItemRow, ownerEmail: string): ItemRecord {
     imageUrls: normalizedImages,
     isGroupFunded: row.is_group_funded,
     targetCents: row.target_cents,
+    fundedCents: 0,
+    contributorCount: 0,
     archivedAt: row.archived_at,
     createdAt: row.created_at,
     updatedAt: row.updated_at,
@@ -389,6 +421,19 @@ async function listActiveReservedItemIds(itemIds: string[]): Promise<Set<string>
     if (row.item_id) reservedIds.add(row.item_id);
   }
   return reservedIds;
+}
+
+async function listContributionRowsByItemIds(itemIds: string[]): Promise<ContributionRow[]> {
+  if (itemIds.length === 0) return [];
+
+  const supabase = getSupabaseAdminClient();
+  const { data, error } = await supabase
+    .from("contributions")
+    .select(contributionSelectColumns())
+    .in("item_id", itemIds);
+
+  if (error) throw error;
+  return (data || []) as unknown as ContributionRow[];
 }
 
 async function findActiveReservationRowForItem(itemId: string): Promise<ReservationRow | null> {
@@ -682,6 +727,48 @@ function fundedCentsForItem(itemId: string): number {
     .reduce((sum, contribution) => sum + contribution.amountCents, 0);
 }
 
+function contributorCountForItem(itemId: string): number {
+  const store = getStore();
+  const contributorEmails = new Set(
+    store.contributions
+      .filter((contribution) => contribution.itemId === itemId)
+      .map((contribution) => normalizeEmail(contribution.actorEmail)),
+  );
+  contributorEmails.delete("");
+  return contributorEmails.size;
+}
+
+type ContributionStats = {
+  fundedCents: number;
+  contributorCount: number;
+};
+
+function buildContributionStatsByItem(rows: ContributionRow[]): Map<string, ContributionStats> {
+  const totalsByItem = new Map<string, { fundedCents: number; contributorUserIds: Set<string> }>();
+
+  for (const row of rows) {
+    if (!row.item_id) continue;
+    const current = totalsByItem.get(row.item_id) || {
+      fundedCents: 0,
+      contributorUserIds: new Set<string>(),
+    };
+
+    current.fundedCents += Number.isFinite(row.amount_cents) ? row.amount_cents : 0;
+    if (row.user_id) current.contributorUserIds.add(row.user_id);
+    totalsByItem.set(row.item_id, current);
+  }
+
+  const statsByItem = new Map<string, ContributionStats>();
+  for (const [itemId, totals] of totalsByItem.entries()) {
+    statsByItem.set(itemId, {
+      fundedCents: totals.fundedCents,
+      contributorCount: totals.contributorUserIds.size,
+    });
+  }
+
+  return statsByItem;
+}
+
 function activeReservationForItem(itemId: string): ReservationRecord | null {
   const store = getStore();
   const found = store.reservations.find((reservation) => reservation.itemId === itemId && reservation.status === "active");
@@ -692,9 +779,12 @@ function buildPublicItemReadModel(
   item: ItemRecord,
   options?: {
     availability?: "available" | "reserved";
+    fundedCents?: number;
+    contributorCount?: number;
   },
 ): PublicItemReadModel {
-  const fundedCents = fundedCentsForItem(item.id);
+  const fundedCents = options?.fundedCents ?? fundedCentsForItem(item.id);
+  const contributorCount = options?.contributorCount ?? contributorCountForItem(item.id);
   const activeReservation = activeReservationForItem(item.id);
   const ratio =
     item.isGroupFunded && item.targetCents && item.targetCents > 0
@@ -711,6 +801,7 @@ function buildPublicItemReadModel(
     isGroupFunded: item.isGroupFunded,
     targetCents: item.targetCents,
     fundedCents,
+    contributorCount,
     progressRatio: ratio,
     availability: options?.availability || (activeReservation ? "reserved" : "available"),
     updatedAt: item.updatedAt,
@@ -924,6 +1015,71 @@ export async function archiveItem(input: { itemId: string; ownerEmail: string })
   upsertCachedItem(item);
   logAudit("archive", item.id, input.ownerEmail, item.wishlistId);
 
+  try {
+    await processArchivedReservationNotifications({
+      wishlistId: item.wishlistId,
+      itemId: item.id,
+      archivedAt,
+      archivedItemTitle: item.title,
+      archivedItemPriceCents: item.priceCents,
+    });
+
+    const store = getStore();
+    store.reservations = store.reservations.map((reservation) =>
+      reservation.itemId === item.id && reservation.status === "active"
+        ? {
+            ...reservation,
+            status: "released",
+            updatedAt: archivedAt,
+          }
+        : reservation,
+    );
+  } catch (error) {
+    console.warn("archive_notification_failed", {
+      itemId: item.id,
+      wishlistId: item.wishlistId,
+      error: error instanceof Error ? error.message : "unknown",
+    });
+  }
+
+  return {
+    item,
+  };
+}
+
+export async function restoreArchivedItem(input: { itemId: string; ownerEmail: string }) {
+  const owned = await findOwnedItem({
+    itemId: input.itemId,
+    ownerEmail: input.ownerEmail,
+  });
+  if ("error" in owned) return { error: owned.error };
+
+  if (!owned.archivedAt) {
+    return {
+      item: owned,
+    };
+  }
+
+  const restoredAt = nowIso();
+  const supabase = getSupabaseAdminClient();
+  const { data, error } = await supabase
+    .from("items")
+    .update({
+      archived_at: null,
+      updated_at: restoredAt,
+    })
+    .eq("id", owned.id)
+    .select(itemSelectColumns())
+    .single();
+
+  if (error || !data) {
+    throw error || new Error("Unable to restore item.");
+  }
+
+  const item = mapItemRowToRecord(data as unknown as ItemRow, input.ownerEmail);
+  upsertCachedItem(item);
+  logAudit("update", item.id, input.ownerEmail, item.wishlistId);
+
   return {
     item,
   };
@@ -935,14 +1091,25 @@ export async function listItemsForWishlist(input: { wishlistId: string; ownerEma
 
   const rows = await listItemRowsByWishlist(input.wishlistId);
   const items = rows.map((row) => mapItemRowToRecord(row, input.ownerEmail));
+  const contributionRows = await listContributionRowsByItemIds(items.map((item) => item.id));
+  const statsByItem = buildContributionStatsByItem(contributionRows);
+  const hydratedItems = items.map((item) => {
+    const stats = statsByItem.get(item.id);
+    if (!stats) return item;
+    return {
+      ...item,
+      fundedCents: stats.fundedCents,
+      contributorCount: stats.contributorCount,
+    };
+  });
 
   const store = getStore();
   store.items = store.items.filter(
     (item) => !(item.wishlistId === input.wishlistId && item.ownerEmail === input.ownerEmail),
   );
-  store.items.unshift(...items);
+  store.items.unshift(...hydratedItems);
 
-  return items;
+  return hydratedItems;
 }
 
 export async function listPublicItemsForWishlist(input: { wishlistId: string }): Promise<PublicItemReadModel[]> {
@@ -955,10 +1122,14 @@ export async function listPublicItemsForWishlist(input: { wishlistId: string }):
     upsertCachedItem(item);
   }
 
+  const contributionRows = await listContributionRowsByItemIds(activeItems.map((item) => item.id));
+  const statsByItem = buildContributionStatsByItem(contributionRows);
   const reservedItemIds = await listActiveReservedItemIds(activeItems.map((item) => item.id));
   const baseModels = activeItems.map((item) =>
     buildPublicItemReadModel(item, {
       availability: reservedItemIds.has(item.id) ? "reserved" : "available",
+      fundedCents: statsByItem.get(item.id)?.fundedCents ?? 0,
+      contributorCount: statsByItem.get(item.id)?.contributorCount ?? 0,
     }),
   );
   return Promise.all(baseModels.map((item) => hydratePublicItemImage(item)));
@@ -1142,18 +1313,26 @@ export async function unreservePublicItem(input: { wishlistId: string; itemId: s
   };
 }
 
-export function contributeToPublicItem(input: {
+export async function contributeToPublicItem(input: {
   wishlistId: string;
   itemId: string;
   actorEmail: string;
   amountCents: number;
 }) {
-  const store = getStore();
-  const item = store.items.find((candidate) => candidate.id === input.itemId && candidate.wishlistId === input.wishlistId);
-
-  if (!item) {
-    return { error: "NOT_FOUND" as ContributionMutationError };
+  const actorUserId = await resolveActorUserId(input.actorEmail);
+  if (!actorUserId) {
+    return { error: "ACTOR_NOT_FOUND" as ContributionMutationError };
   }
+
+  const itemLookup = await findPublicItemForMutation({
+    wishlistId: input.wishlistId,
+    itemId: input.itemId,
+  });
+  if ("error" in itemLookup) {
+    return { error: itemLookup.error as ContributionMutationError };
+  }
+
+  let item = itemLookup;
 
   if (item.archivedAt) {
     return { error: "ARCHIVED" as ContributionMutationError };
@@ -1167,31 +1346,138 @@ export function contributeToPublicItem(input: {
     return { error: "INVALID_AMOUNT" as ContributionMutationError };
   }
 
+  const createdAt = nowIso();
+  const supabase = getSupabaseAdminClient();
+  const { data: inserted, error: insertError } = await supabase
+    .from("contributions")
+    .insert({
+      item_id: item.id,
+      user_id: actorUserId,
+      amount_cents: input.amountCents,
+      created_at: createdAt,
+    })
+    .select(contributionSelectColumns())
+    .single();
+
+  if (insertError || !inserted) {
+    throw insertError || new Error("Unable to create contribution.");
+  }
+
+  const touched = await touchItemUpdatedAt(item.id, createdAt);
+  if (touched) {
+    item = touched;
+  }
+
+  const insertedRow = inserted as unknown as ContributionRow;
+  const contributionRows = await listContributionRowsByItemIds([item.id]);
+  const contributionStats = buildContributionStatsByItem(contributionRows).get(item.id) || {
+    fundedCents: input.amountCents,
+    contributorCount: 1,
+  };
+
+  const store = getStore();
   const contribution: ContributionRecord = {
-    id: randomUUID(),
+    id: insertedRow.id || randomUUID(),
     wishlistId: item.wishlistId,
     itemId: item.id,
     actorEmail: input.actorEmail,
     amountCents: input.amountCents,
-    createdAt: nowIso(),
+    createdAt: insertedRow.created_at || createdAt,
   };
 
   store.contributions.unshift(contribution);
-  item.updatedAt = contribution.createdAt;
+  item.fundedCents = contributionStats.fundedCents;
+  item.contributorCount = contributionStats.contributorCount;
   logAudit("contribute", item.id, input.actorEmail, item.wishlistId);
 
   return {
     contribution,
-    item: buildPublicItemReadModel(item),
+    item: buildPublicItemReadModel(item, {
+      fundedCents: contributionStats.fundedCents,
+      contributorCount: contributionStats.contributorCount,
+    }),
   };
 }
 
-export function listActivityForActor(input: { actorEmail: string }): ActivityEntry[] {
+export async function recordWishlistOpen(input: { wishlistId: string; actorEmail: string }) {
+  const actorUserId = await resolveActorUserId(input.actorEmail);
+  if (!actorUserId) {
+    return { error: "ACTOR_NOT_FOUND" as const };
+  }
+
+  const now = nowIso();
+  const supabase = getSupabaseAdminClient();
+
+  const { data: existing, error: existingError } = await supabase
+    .from("wishlist_opens")
+    .select(wishlistOpenSelectColumns())
+    .eq("wishlist_id", input.wishlistId)
+    .eq("user_id", actorUserId)
+    .maybeSingle();
+
+  if (existingError && existingError.code !== "PGRST116") {
+    throw existingError;
+  }
+
+  if (!existing) {
+    const { error: insertError } = await supabase.from("wishlist_opens").insert({
+      wishlist_id: input.wishlistId,
+      user_id: actorUserId,
+      first_opened_at: now,
+      last_opened_at: now,
+      open_count: 1,
+    });
+    if (insertError) throw insertError;
+
+    return {
+      ok: true as const,
+      openCount: 1,
+      lastOpenedAt: now,
+    };
+  }
+
+  const row = existing as unknown as WishlistOpenRow;
+  const nextOpenCount = (Number.isFinite(row.open_count) ? row.open_count : 0) + 1;
+
+  const { error: updateError } = await supabase
+    .from("wishlist_opens")
+    .update({
+      last_opened_at: now,
+      open_count: nextOpenCount,
+    })
+    .eq("id", row.id);
+
+  if (updateError) throw updateError;
+
+  return {
+    ok: true as const,
+    openCount: nextOpenCount,
+    lastOpenedAt: now,
+  };
+}
+
+async function listWishlistOpenRowsByActor(actorUserId: string): Promise<WishlistOpenRow[]> {
+  const supabase = getSupabaseAdminClient();
+  const { data, error } = await supabase
+    .from("wishlist_opens")
+    .select(wishlistOpenSelectColumns())
+    .eq("user_id", actorUserId)
+    .order("last_opened_at", { ascending: false });
+
+  if (error) throw error;
+  return (data || []) as unknown as WishlistOpenRow[];
+}
+
+export async function listActivityForActor(input: { actorEmail: string }): Promise<ActivityEntry[]> {
+  const normalizedActorEmail = normalizeEmail(input.actorEmail);
+  const actorUserId = await resolveActorUserId(normalizedActorEmail);
+  if (!actorUserId) return [];
+
   const store = getStore();
   const itemTitleById = new Map(store.items.map((item) => [item.id, item.title]));
 
   const reservationEntries: ActivityEntry[] = store.reservations
-    .filter((reservation) => reservation.actorEmail === input.actorEmail)
+    .filter((reservation) => normalizeEmail(reservation.actorEmail) === normalizedActorEmail)
     .map((reservation) => ({
       id: `res-${reservation.id}`,
       kind: "reservation",
@@ -1201,11 +1487,12 @@ export function listActivityForActor(input: { actorEmail: string }): ActivityEnt
       itemTitle: itemTitleById.get(reservation.itemId) || "Untitled item",
       amountCents: null,
       status: reservation.status,
+      openCount: null,
       happenedAt: reservation.updatedAt,
     }));
 
   const contributionEntries: ActivityEntry[] = store.contributions
-    .filter((contribution) => contribution.actorEmail === input.actorEmail)
+    .filter((contribution) => normalizeEmail(contribution.actorEmail) === normalizedActorEmail)
     .map((contribution) => ({
       id: `con-${contribution.id}`,
       kind: "contribution",
@@ -1215,10 +1502,24 @@ export function listActivityForActor(input: { actorEmail: string }): ActivityEnt
       itemTitle: itemTitleById.get(contribution.itemId) || "Untitled item",
       amountCents: contribution.amountCents,
       status: null,
+      openCount: null,
       happenedAt: contribution.createdAt,
     }));
+  const wishlistOpenRows = await listWishlistOpenRowsByActor(actorUserId);
+  const wishlistVisitEntries: ActivityEntry[] = wishlistOpenRows.map((row) => ({
+    id: `open-${row.id}`,
+    kind: "visit",
+    action: "opened_wishlist",
+    wishlistId: row.wishlist_id,
+    itemId: null,
+    itemTitle: null,
+    amountCents: null,
+    status: null,
+    openCount: row.open_count,
+    happenedAt: row.last_opened_at,
+  }));
 
-  return [...reservationEntries, ...contributionEntries].sort(
+  return [...wishlistVisitEntries, ...reservationEntries, ...contributionEntries].sort(
     (a, b) => new Date(b.happenedAt).getTime() - new Date(a.happenedAt).getTime(),
   );
 }
@@ -1576,6 +1877,8 @@ export async function deleteItemsForWishlist(input: { wishlistId: string; ownerE
     return { deletedCount: 0 };
   }
 
+  const itemIdList = Array.from(itemIds);
+
   for (const row of rows) {
     const item = mapItemRowToRecord(row, input.ownerEmail);
     for (const imageRef of getItemImageUrls(item)) {
@@ -1586,6 +1889,18 @@ export async function deleteItemsForWishlist(input: { wishlistId: string; ownerE
   }
 
   const supabase = getSupabaseAdminClient();
+  const { error: contributionDeleteError } = await supabase
+    .from("contributions")
+    .delete()
+    .in("item_id", itemIdList);
+  if (contributionDeleteError) throw contributionDeleteError;
+
+  const { error: reservationDeleteError } = await supabase
+    .from("reservations")
+    .delete()
+    .eq("wishlist_id", input.wishlistId);
+  if (reservationDeleteError) throw reservationDeleteError;
+
   const { error } = await supabase.from("items").delete().eq("wishlist_id", input.wishlistId);
   if (error) throw error;
 

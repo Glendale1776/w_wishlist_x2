@@ -11,14 +11,15 @@ type ActivityApiResponse =
       ok: true;
       activities: Array<{
         id: string;
-        kind: "reservation" | "contribution";
-        action: "reserved" | "unreserved" | "contributed";
+        kind: "reservation" | "contribution" | "visit";
+        action: "reserved" | "unreserved" | "contributed" | "opened_wishlist";
         wishlistId: string;
         wishlistTitle: string;
-        itemId: string;
-        itemTitle: string;
+        itemId: string | null;
+        itemTitle: string | null;
         amountCents: number | null;
         status: "active" | "released" | null;
+        openCount: number | null;
         happenedAt: string;
         openItemPath: string | null;
       }>;
@@ -44,14 +45,15 @@ export default function ActivityPage() {
   const [rows, setRows] = useState<
     Array<{
       id: string;
-      kind: "reservation" | "contribution";
-      action: "reserved" | "unreserved" | "contributed";
+      kind: "reservation" | "contribution" | "visit";
+      action: "reserved" | "unreserved" | "contributed" | "opened_wishlist";
       wishlistId: string;
       wishlistTitle: string;
-      itemId: string;
-      itemTitle: string;
+      itemId: string | null;
+      itemTitle: string | null;
       amountCents: number | null;
       status: "active" | "released" | null;
+      openCount: number | null;
       happenedAt: string;
       openItemPath: string | null;
     }>
@@ -113,7 +115,7 @@ export default function ActivityPage() {
     return rows.filter((row) => {
       return (
         row.wishlistTitle.toLowerCase().includes(needle) ||
-        row.itemTitle.toLowerCase().includes(needle) ||
+        (row.itemTitle || "").toLowerCase().includes(needle) ||
         row.action.toLowerCase().includes(needle)
       );
     });
@@ -125,7 +127,9 @@ export default function ActivityPage() {
         <div className="flex flex-wrap items-center justify-between gap-3">
           <div>
             <h1 className="text-2xl font-semibold tracking-tight">My activity</h1>
-            <p className="mt-1 text-sm text-zinc-600">Your reservations and contributions across shared wishlists.</p>
+            <p className="mt-1 text-sm text-zinc-600">
+              Your opened wishlists, reservations, and contributions across shared wishlists.
+            </p>
           </div>
           <Link className="rounded-md border border-zinc-300 px-3 py-2 text-sm font-medium text-zinc-800" href="/wishlists">
             Back to My wishlists
@@ -161,9 +165,15 @@ export default function ActivityPage() {
               <div className="flex flex-wrap items-start justify-between gap-3">
                 <div>
                   <h2 className="text-sm font-semibold text-zinc-900">{row.wishlistTitle}</h2>
-                  <p className="mt-1 text-sm text-zinc-700">{row.itemTitle}</p>
+                  <p className="mt-1 text-sm text-zinc-700">{row.itemTitle || "Wishlist opened"}</p>
                   <p className="mt-1 text-xs text-zinc-600">
-                    {row.action === "contributed" ? "Contributed" : row.action === "reserved" ? "Reserved" : "Released reservation"}
+                    {row.action === "opened_wishlist"
+                      ? `Opened wishlist${row.openCount && row.openCount > 1 ? ` • ${row.openCount} visits` : ""}`
+                      : row.action === "contributed"
+                        ? "Contributed"
+                        : row.action === "reserved"
+                          ? "Reserved"
+                          : "Released reservation"}
                     {row.amountCents !== null ? ` • ${formatMoney(row.amountCents)}` : ""}
                     {row.status ? ` • ${row.status}` : ""}
                   </p>
@@ -176,7 +186,7 @@ export default function ActivityPage() {
                       className="mt-2 inline-flex rounded-md border border-zinc-300 px-3 py-2 text-xs font-medium text-zinc-800"
                       href={row.openItemPath}
                     >
-                      Open item
+                      {row.action === "opened_wishlist" ? "Open wishlist" : "Open item"}
                     </Link>
                   ) : null}
                 </div>

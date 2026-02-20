@@ -2,7 +2,7 @@
 
 import Link from "next/link";
 import { useRouter, useSearchParams } from "next/navigation";
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import { getAuthenticatedEmail, persistReturnTo } from "@/app/_lib/auth-client";
 
@@ -26,6 +26,7 @@ type PublicItem = {
   isGroupFunded: boolean;
   targetCents: number | null;
   fundedCents: number;
+  contributorCount: number;
   progressRatio: number;
   availability: "available" | "reserved";
 };
@@ -89,6 +90,19 @@ type ContributionActionResponse =
         createdAt: string;
       };
       item: PublicItem;
+    }
+  | ApiErrorResponse;
+
+type ArchiveAlertResponse =
+  | {
+      ok: true;
+      alert: {
+        id: string;
+        archivedItemTitle: string;
+        archivedItemPriceCents: number | null;
+        suggestedItemIds: string[];
+        createdAt: string;
+      } | null;
     }
   | ApiErrorResponse;
 
@@ -157,6 +171,11 @@ export default function PublicWishlistClient({ shareToken }: { shareToken: strin
   const [actionSuccess, setActionSuccess] = useState<string | null>(null);
   const [reserveConfirmation, setReserveConfirmation] = useState<string | null>(null);
   const [authEmail, setAuthEmail] = useState<string | null>(null);
+  const [archiveAlert, setArchiveAlert] = useState<Extract<ArchiveAlertResponse, { ok: true }>["alert"]>(null);
+  const [suggestedItemIds, setSuggestedItemIds] = useState<string[]>([]);
+  const [isDismissingArchiveAlert, setIsDismissingArchiveAlert] = useState(false);
+  const trackedOpenKeyRef = useRef<string | null>(null);
+  const trackedArchiveAlertVersionRef = useRef<string | null>(null);
 
   const applyModel = useCallback((nextModel: PublicWishlistModel, preserveScroll: boolean) => {
     if (!preserveScroll || typeof window === "undefined") {
@@ -379,6 +398,46 @@ export default function PublicWishlistClient({ shareToken }: { shareToken: strin
     }
   }, [activeItemId, model, searchParams]);
 
+  useEffect(() => {
+    if (!model || !authEmail) return;
+
+    const key = `${model.wishlist.id}:${authEmail}`;
+    if (trackedOpenKeyRef.current === key) return;
+    trackedOpenKeyRef.current = key;
+
+    void fetch(`/api/public/${encodeURIComponent(shareToken)}/opened`, {
+      method: "POST",
+      headers: {
+        "x-actor-email": authEmail,
+      },
+    }).catch(() => undefined);
+  }, [authEmail, model, shareToken]);
+
+  useEffect(() => {
+    if (!model || !authEmail) return;
+
+    const key = `${model.version}:${authEmail}`;
+    if (trackedArchiveAlertVersionRef.current === key) return;
+    trackedArchiveAlertVersionRef.current = key;
+
+    void (async () => {
+      try {
+        const response = await fetch(`/api/public/${encodeURIComponent(shareToken)}/archive-alert`, {
+          headers: {
+            "x-actor-email": authEmail,
+          },
+        });
+        const payload = (await response.json()) as ArchiveAlertResponse;
+        if (!response.ok || !payload.ok || !payload.alert) return;
+
+        setArchiveAlert(payload.alert);
+        setSuggestedItemIds(payload.alert.suggestedItemIds || []);
+      } catch {
+        // Ignore alert fetch errors.
+      }
+    })();
+  }, [authEmail, model, shareToken]);
+
   const filteredItems = useMemo(() => {
     if (!model) return [];
 
@@ -393,12 +452,40 @@ export default function PublicWishlistClient({ shareToken }: { shareToken: strin
     });
   }, [availabilityFilter, fundingFilter, model, search]);
 
+  const suggestedOrder = useMemo(() => {
+    const order = new Map<string, number>();
+    suggestedItemIds.forEach((id, index) => order.set(id, index));
+    return order;
+  }, [suggestedItemIds]);
+
+  const prioritizedItems = useMemo(() => {
+    if (filteredItems.length <= 1 || suggestedOrder.size === 0) return filteredItems;
+    return [...filteredItems].sort((left, right) => {
+      const leftRank = suggestedOrder.has(left.id) ? suggestedOrder.get(left.id)! : Number.MAX_SAFE_INTEGER;
+      const rightRank = suggestedOrder.has(right.id) ? suggestedOrder.get(right.id)! : Number.MAX_SAFE_INTEGER;
+      if (leftRank !== rightRank) return leftRank - rightRank;
+      return 0;
+    });
+  }, [filteredItems, suggestedOrder]);
+
+  const reservedStats = useMemo(() => {
+    if (!model) return { reserved: 0, total: 0 };
+    const total = model.items.length;
+    const reserved = model.items.reduce(
+      (count, item) => (item.availability === "reserved" ? count + 1 : count),
+      0,
+    );
+    return { reserved, total };
+  }, [model]);
+
   const activeItem = useMemo(() => {
     if (!model || !activeItemId) return null;
     return model.items.find((item) => item.id === activeItemId) || null;
   }, [activeItemId, model]);
 
   const hasActiveFilters = Boolean(search.trim()) || availabilityFilter !== "all" || fundingFilter !== "all";
+  const activeFilterCount =
+    (search.trim() ? 1 : 0) + (availabilityFilter !== "all" ? 1 : 0) + (fundingFilter !== "all" ? 1 : 0);
 
   async function reserveAction(action: "reserve" | "unreserve") {
     if (!activeItem) return;
@@ -505,8 +592,35 @@ export default function PublicWishlistClient({ shareToken }: { shareToken: strin
     }
 
     updateItemInModel(payload.item);
-    setActionSuccess("Contribution saved.");
-    setContributionInput("");
+    closeModal();
+    setReserveConfirmation("Contribution saved.");
+  }
+
+  async function dismissArchiveAlert() {
+    if (!archiveAlert || !authEmail) {
+      setArchiveAlert(null);
+      return;
+    }
+
+    setIsDismissingArchiveAlert(true);
+
+    try {
+      await fetch(`/api/public/${encodeURIComponent(shareToken)}/archive-alert`, {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          "x-actor-email": authEmail,
+        },
+        body: JSON.stringify({
+          notificationId: archiveAlert.id,
+        }),
+      });
+    } catch {
+      // Ignore dismiss failures. UI still closes for this session.
+    } finally {
+      setIsDismissingArchiveAlert(false);
+      setArchiveAlert(null);
+    }
   }
 
   const openModal = useCallback((itemId: string) => {
@@ -571,6 +685,33 @@ export default function PublicWishlistClient({ shareToken }: { shareToken: strin
         </div>
       ) : null}
 
+      {archiveAlert ? (
+        <div className="fixed inset-x-0 top-5 z-[61] flex justify-center px-4">
+          <div className="w-full max-w-xl rounded-2xl border border-amber-300 bg-gradient-to-r from-amber-50 via-white to-sky-50 px-4 py-3 shadow-lg">
+            <div className="flex items-start justify-between gap-3">
+              <div>
+                <p className="text-sm font-semibold text-amber-900">Reserved item was archived</p>
+                <p className="mt-1 text-xs text-zinc-700">
+                  "{archiveAlert.archivedItemTitle}"{" "}
+                  {archiveAlert.archivedItemPriceCents !== null
+                    ? `(${formatMoney(archiveAlert.archivedItemPriceCents, model?.wishlist.currency || "USD")})`
+                    : ""}
+                  . Suggested similar-price items are highlighted at the top.
+                </p>
+              </div>
+              <button
+                className="rounded-md border border-zinc-300 px-2.5 py-1 text-xs font-medium text-zinc-800"
+                disabled={isDismissingArchiveAlert}
+                onClick={() => void dismissArchiveAlert()}
+                type="button"
+              >
+                {isDismissingArchiveAlert ? "Closing..." : "OK"}
+              </button>
+            </div>
+          </div>
+        </div>
+      ) : null}
+
       {connectionState === "disconnected" ? (
         <div className="mb-4 rounded-md border border-amber-300 bg-amber-50 px-3 py-2 text-sm text-amber-900">
           Live updates are reconnecting. Poll fallback runs every 30 seconds.
@@ -616,6 +757,9 @@ export default function PublicWishlistClient({ shareToken }: { shareToken: strin
                     <span className="rounded-full bg-white/90 px-2.5 py-1 font-medium text-zinc-700 ring-1 ring-sky-100">
                       {model.wishlist.itemCount} active items
                     </span>
+                    <span className="rounded-full bg-white/90 px-2.5 py-1 font-medium text-zinc-700 ring-1 ring-sky-100">
+                      {reservedStats.reserved} of {reservedStats.total} reserved
+                    </span>
                   </div>
                   {model.wishlist.occasionNote ? (
                     <p className="mt-3 max-w-3xl text-sm text-zinc-700">{model.wishlist.occasionNote}</p>
@@ -653,16 +797,22 @@ export default function PublicWishlistClient({ shareToken }: { shareToken: strin
           </header>
 
           <section className="mt-6 space-y-3">
-            {filteredItems.length === 0 ? (
+            {prioritizedItems.length === 0 ? (
               <div className="rounded-xl border border-dashed border-zinc-300 bg-white p-6 text-center text-sm text-zinc-600">
                 No matching items right now.
               </div>
             ) : (
-              filteredItems.map((item) => {
+              prioritizedItems.map((item) => {
                 const progressPercent = Math.max(0, Math.min(100, Math.round(item.progressRatio * 100)));
+                const isSuggested = suggestedOrder.has(item.id);
 
                 return (
-                  <article className="rounded-xl border border-zinc-200 bg-white p-4 shadow-sm" key={item.id}>
+                  <article
+                    className={`rounded-xl border bg-white p-4 shadow-sm ${
+                      isSuggested ? "border-sky-300 ring-1 ring-sky-200" : "border-zinc-200"
+                    }`}
+                    key={item.id}
+                  >
                     <div className="flex flex-wrap gap-3">
                       <div className="h-20 w-20 shrink-0 overflow-hidden rounded-md border border-zinc-200 bg-zinc-50">
                         {item.imageUrl ? (
@@ -682,6 +832,11 @@ export default function PublicWishlistClient({ shareToken }: { shareToken: strin
                               {formatMoney(item.priceCents, model.wishlist.currency)}
                               {item.url ? ` • ${item.url}` : ""}
                             </p>
+                            {isSuggested ? (
+                              <p className="mt-1 inline-flex rounded-full bg-sky-100 px-2 py-0.5 text-[11px] font-semibold text-sky-800">
+                                Suggested alternative
+                              </p>
+                            ) : null}
                           </div>
                           <span
                             className={`rounded-full px-2.5 py-1 text-xs font-medium ${
@@ -830,38 +985,39 @@ export default function PublicWishlistClient({ shareToken }: { shareToken: strin
 
       {isFilterOpen ? (
         <div
-          className="fixed inset-0 z-40 flex items-start justify-center bg-black/35 p-4 pt-16 sm:pt-20"
+          className="fixed inset-0 z-40 flex items-start justify-center bg-white/25 p-4 pt-16 backdrop-blur-[2px] sm:pt-20"
           onClick={(event) => {
             if (event.target === event.currentTarget) setIsFilterOpen(false);
           }}
         >
-          <div className="w-full max-w-md rounded-2xl bg-white p-4 shadow-xl sm:p-5">
-            <div className="flex items-center justify-between gap-3">
-              <h2 className="text-sm font-semibold uppercase tracking-[0.1em] text-zinc-700">Filters</h2>
-              <button
-                className="rounded-md border border-zinc-300 px-2.5 py-1.5 text-xs font-medium text-zinc-700 transition hover:bg-zinc-50"
-                onClick={() => setIsFilterOpen(false)}
-                type="button"
-              >
-                Close
-              </button>
+          <div className="filters-sheet w-full max-w-lg overflow-hidden rounded-[1.75rem] border border-white/70 bg-[rgba(255,255,255,0.9)] shadow-[0_30px_80px_-35px_rgba(15,23,42,0.45)] backdrop-blur-xl">
+            <div className="flex items-start justify-between gap-3 border-b border-zinc-100/90 px-5 pb-4 pt-5 sm:px-6">
+              <div>
+                <h2 className="text-sm font-semibold uppercase tracking-[0.14em] text-zinc-700">Filters</h2>
+                <p className="mt-1 text-xs text-zinc-500">Refine visible gifts quickly.</p>
+              </div>
+              {hasActiveFilters ? (
+                <span className="rounded-full border border-sky-100 bg-sky-50 px-2.5 py-1 text-[11px] font-semibold text-sky-700">
+                  {activeFilterCount} active
+                </span>
+              ) : null}
             </div>
 
-            <div className="mt-4 space-y-3">
-              <label className="text-sm">
-                <span className="mb-1 block text-xs font-semibold uppercase tracking-wide text-zinc-500">Search</span>
+            <div className="space-y-3 px-5 py-4 sm:px-6">
+              <label className="block rounded-2xl border border-zinc-200/90 bg-white/85 p-3 text-sm shadow-[inset_0_1px_0_rgba(255,255,255,0.7)]">
+                <span className="mb-1 block text-[11px] font-semibold uppercase tracking-[0.12em] text-zinc-500">Search</span>
                 <input
-                  className="w-full rounded-xl border border-zinc-300 bg-white px-3 py-2 text-sm outline-none transition focus:border-sky-400 focus:ring-2 focus:ring-sky-100"
+                  className="w-full rounded-2xl border border-zinc-200 bg-white px-3 py-2.5 text-sm outline-none transition focus:border-sky-400 focus:ring-4 focus:ring-sky-100"
                   onChange={(event) => setSearch(event.target.value)}
                   placeholder="Type item name or keyword"
                   value={search}
                 />
               </label>
 
-              <label className="text-sm">
-                <span className="mb-1 block text-xs font-semibold uppercase tracking-wide text-zinc-500">Availability</span>
+              <label className="block rounded-2xl border border-zinc-200/90 bg-white/85 p-3 text-sm shadow-[inset_0_1px_0_rgba(255,255,255,0.7)]">
+                <span className="mb-1 block text-[11px] font-semibold uppercase tracking-[0.12em] text-zinc-500">Availability</span>
                 <select
-                  className="w-full rounded-xl border border-zinc-300 bg-white px-3 py-2 text-sm outline-none transition focus:border-sky-400 focus:ring-2 focus:ring-sky-100"
+                  className="w-full rounded-2xl border border-zinc-200 bg-white px-3 py-2.5 text-sm outline-none transition focus:border-sky-400 focus:ring-4 focus:ring-sky-100"
                   onChange={(event) => setAvailabilityFilter(event.target.value as "all" | "available" | "reserved")}
                   value={availabilityFilter}
                 >
@@ -871,10 +1027,10 @@ export default function PublicWishlistClient({ shareToken }: { shareToken: strin
                 </select>
               </label>
 
-              <label className="text-sm">
-                <span className="mb-1 block text-xs font-semibold uppercase tracking-wide text-zinc-500">Funding</span>
+              <label className="block rounded-2xl border border-zinc-200/90 bg-white/85 p-3 text-sm shadow-[inset_0_1px_0_rgba(255,255,255,0.7)]">
+                <span className="mb-1 block text-[11px] font-semibold uppercase tracking-[0.12em] text-zinc-500">Funding</span>
                 <select
-                  className="w-full rounded-xl border border-zinc-300 bg-white px-3 py-2 text-sm outline-none transition focus:border-sky-400 focus:ring-2 focus:ring-sky-100"
+                  className="w-full rounded-2xl border border-zinc-200 bg-white px-3 py-2.5 text-sm outline-none transition focus:border-sky-400 focus:ring-4 focus:ring-sky-100"
                   onChange={(event) => setFundingFilter(event.target.value as "all" | "group" | "single")}
                   value={fundingFilter}
                 >
@@ -885,9 +1041,9 @@ export default function PublicWishlistClient({ shareToken }: { shareToken: strin
               </label>
             </div>
 
-            <div className="mt-5 flex items-center justify-between">
+            <div className="flex items-center justify-between gap-3 border-t border-zinc-100/90 bg-gradient-to-r from-zinc-50/85 to-white px-5 py-4 sm:px-6">
               <button
-                className="rounded-md border border-zinc-300 px-3 py-2 text-sm font-medium text-zinc-700 transition hover:bg-zinc-50 disabled:opacity-50"
+                className="rounded-full px-1 text-sm font-medium text-zinc-500 transition hover:text-zinc-700 disabled:cursor-not-allowed disabled:opacity-45"
                 disabled={!hasActiveFilters}
                 onClick={() => {
                   setSearch("");
@@ -899,7 +1055,14 @@ export default function PublicWishlistClient({ shareToken }: { shareToken: strin
                 Reset
               </button>
               <button
-                className="rounded-md bg-sky-600 px-3 py-2 text-sm font-medium text-white transition hover:bg-sky-700"
+                className="rounded-full border border-zinc-300 bg-white px-4 py-2 text-sm font-medium text-zinc-700 transition hover:bg-zinc-50"
+                onClick={() => setIsFilterOpen(false)}
+                type="button"
+              >
+                Close
+              </button>
+              <button
+                className="rounded-full bg-gradient-to-r from-blue-600 to-sky-500 px-5 py-2 text-sm font-semibold text-white shadow-[0_8px_20px_-10px_rgba(30,64,175,0.7)] transition hover:brightness-105"
                 onClick={() => setIsFilterOpen(false)}
                 type="button"
               >
@@ -911,12 +1074,27 @@ export default function PublicWishlistClient({ shareToken }: { shareToken: strin
       ) : null}
 
       <style jsx>{`
+        .filters-sheet {
+          animation: filters-sheet-in 180ms ease-out;
+        }
+
         .reserve-confirmation {
           background-image: linear-gradient(120deg, #2563eb, #7c3aed, #ec4899, #2563eb);
           background-size: 220% 220%;
           animation:
             reserve-confirmation-in 180ms ease-out,
             reserve-confirmation-gradient 900ms linear infinite;
+        }
+
+        @keyframes filters-sheet-in {
+          from {
+            opacity: 0;
+            transform: translateY(-8px) scale(0.985);
+          }
+          to {
+            opacity: 1;
+            transform: translateY(0) scale(1);
+          }
         }
 
         @keyframes reserve-confirmation-in {

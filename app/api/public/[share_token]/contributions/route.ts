@@ -3,6 +3,7 @@ import { NextRequest, NextResponse } from "next/server";
 import {
   consumeActionRateLimit,
   contributeToPublicItem,
+  hydratePublicItemImage,
   readIdempotency,
   writeIdempotency,
 } from "@/app/_lib/item-store";
@@ -202,6 +203,8 @@ export async function POST(request: NextRequest, context: { params: Promise<{ sh
     return errorResponse(409, "CONFLICT", "This action is unavailable for archived items.");
   }
 
+  const hydratedItem = await hydratePublicItemImage(mutation.item);
+
   const responseBody = {
     ok: true as const,
     contribution: {
@@ -209,7 +212,7 @@ export async function POST(request: NextRequest, context: { params: Promise<{ sh
       amountCents: mutation.contribution.amountCents,
       createdAt: mutation.contribution.createdAt,
     },
-    item: mutation.item,
+    item: hydratedItem,
   };
 
   writeIdempotency({

@@ -243,6 +243,7 @@ export default function WishlistEditorPage() {
   const [formError, setFormError] = useState<string | null>(null);
   const [formSuccess, setFormSuccess] = useState<string | null>(null);
   const [metadataMessage, setMetadataMessage] = useState<string | null>(null);
+  const [priceReviewNotice, setPriceReviewNotice] = useState<string | null>(null);
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [isFetchingMetadata, setIsFetchingMetadata] = useState(false);
 
@@ -476,6 +477,7 @@ export default function WishlistEditorPage() {
     setFormError(null);
     setFormSuccess(null);
     setMetadataMessage(null);
+    setPriceReviewNotice(null);
     setImageMessage(null);
     clearPendingImages();
     setUploadProgress(0);
@@ -615,6 +617,7 @@ export default function WishlistEditorPage() {
     setFormError(null);
     setFormSuccess(null);
     setMetadataMessage(null);
+    setPriceReviewNotice(null);
     setImageMessage(null);
     clearPendingImages();
     setUploadProgress(0);
@@ -793,6 +796,7 @@ export default function WishlistEditorPage() {
     setFormError(null);
     setFormSuccess(null);
     setMetadataMessage(null);
+    setPriceReviewNotice(null);
     setFieldErrors((current) => ({ ...current, imageFile: undefined }));
 
     const ownerEmail = await getAuthenticatedEmail();
@@ -949,6 +953,7 @@ export default function WishlistEditorPage() {
 
   async function onAutofillFromUrl() {
     setMetadataMessage(null);
+    setPriceReviewNotice(null);
 
     const ownerEmail = await getAuthenticatedEmail();
     if (!ownerEmail) {
@@ -989,6 +994,8 @@ export default function WishlistEditorPage() {
             imageUrl: string | null;
             imageUrls?: string[] | null;
             priceCents: number | null;
+            priceNeedsReview?: boolean;
+            priceReviewMessage?: string | null;
           };
         }
       | {
@@ -1031,7 +1038,19 @@ export default function WishlistEditorPage() {
       };
     });
 
-    setMetadataMessage("AI autofill complete. Review fields before saving.");
+    const needsPriceReview = Boolean(payload.metadata.priceNeedsReview) || payload.metadata.priceCents === null;
+    const reviewMessage =
+      payload.metadata.priceReviewMessage?.trim() ||
+      (payload.metadata.priceCents === null
+        ? "Price was not detected. Please enter and verify it before saving."
+        : "Imported price may be inaccurate. Please verify it before saving.");
+
+    setPriceReviewNotice(needsPriceReview ? reviewMessage : null);
+    setMetadataMessage(
+      needsPriceReview
+        ? "AI autofill complete. Please check the price before saving."
+        : "AI autofill complete. Review fields before saving.",
+    );
   }
 
   async function onRemoveImages() {
@@ -1209,19 +1228,27 @@ export default function WishlistEditorPage() {
                   Price (USD)
                 </label>
                 <input
-                  className="w-full rounded-md border border-zinc-300 px-3 py-2 text-sm outline-none focus:border-zinc-500"
+                  className={`w-full rounded-md px-3 py-2 text-sm outline-none ${
+                    priceReviewNotice
+                      ? "border border-amber-400 bg-amber-50 focus:border-amber-500"
+                      : "border border-zinc-300 focus:border-zinc-500"
+                  }`}
                   id="item-price"
                   onChange={(event) =>
-                    setForm((prev) => {
-                      const nextPrice = event.target.value;
-                      const nextTarget = prev.isGroupFunded && !prev.target ? nextPrice : prev.target;
-                      return { ...prev, price: nextPrice, target: nextTarget };
-                    })
+                    {
+                      setPriceReviewNotice(null);
+                      setForm((prev) => {
+                        const nextPrice = event.target.value;
+                        const nextTarget = prev.isGroupFunded && !prev.target ? nextPrice : prev.target;
+                        return { ...prev, price: nextPrice, target: nextTarget };
+                      });
+                    }
                   }
                   placeholder="129.99"
                   value={form.price}
                 />
                 {fieldErrors.priceCents ? <p className="mt-1 text-xs text-rose-700">{fieldErrors.priceCents}</p> : null}
+                {priceReviewNotice ? <p className="mt-1 text-xs text-amber-700">{priceReviewNotice}</p> : null}
               </div>
 
               <div className="rounded-md border border-zinc-200 bg-zinc-50 p-3">

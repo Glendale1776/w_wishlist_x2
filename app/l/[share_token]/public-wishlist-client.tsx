@@ -148,12 +148,14 @@ export default function PublicWishlistClient({ shareToken }: { shareToken: strin
   const [search, setSearch] = useState("");
   const [availabilityFilter, setAvailabilityFilter] = useState<"all" | "available" | "reserved">("all");
   const [fundingFilter, setFundingFilter] = useState<"all" | "group" | "single">("all");
+  const [isFilterOpen, setIsFilterOpen] = useState(false);
 
   const [activeItemId, setActiveItemId] = useState<string | null>(null);
   const [contributionInput, setContributionInput] = useState("");
   const [isMutating, setIsMutating] = useState(false);
   const [actionError, setActionError] = useState<string | null>(null);
   const [actionSuccess, setActionSuccess] = useState<string | null>(null);
+  const [reserveConfirmation, setReserveConfirmation] = useState<string | null>(null);
   const [authEmail, setAuthEmail] = useState<string | null>(null);
 
   const applyModel = useCallback((nextModel: PublicWishlistModel, preserveScroll: boolean) => {
@@ -396,6 +398,8 @@ export default function PublicWishlistClient({ shareToken }: { shareToken: strin
     return model.items.find((item) => item.id === activeItemId) || null;
   }, [activeItemId, model]);
 
+  const hasActiveFilters = Boolean(search.trim()) || availabilityFilter !== "all" || fundingFilter !== "all";
+
   async function reserveAction(action: "reserve" | "unreserve") {
     if (!activeItem) return;
 
@@ -441,7 +445,13 @@ export default function PublicWishlistClient({ shareToken }: { shareToken: strin
     }
 
     updateItemInModel(payload.item);
-    setActionSuccess(action === "reserve" ? "Item reserved." : "Reservation released.");
+    if (action === "reserve") {
+      closeModal();
+      setReserveConfirmation("Item reserved.");
+      return;
+    }
+
+    setActionSuccess("Reservation released.");
   }
 
   async function contributeAction() {
@@ -530,8 +540,37 @@ export default function PublicWishlistClient({ shareToken }: { shareToken: strin
     return () => window.removeEventListener("keydown", onWindowKeyDown);
   }, [activeItemId, closeModal]);
 
+  useEffect(() => {
+    if (!isFilterOpen) return;
+
+    function onWindowKeyDown(event: KeyboardEvent) {
+      if (event.key === "Escape") setIsFilterOpen(false);
+    }
+
+    window.addEventListener("keydown", onWindowKeyDown);
+    return () => window.removeEventListener("keydown", onWindowKeyDown);
+  }, [isFilterOpen]);
+
+  useEffect(() => {
+    if (!reserveConfirmation) return;
+
+    const timer = window.setTimeout(() => {
+      setReserveConfirmation(null);
+    }, 2000);
+
+    return () => window.clearTimeout(timer);
+  }, [reserveConfirmation]);
+
   return (
     <main className="mx-auto min-h-screen max-w-5xl px-4 py-8 sm:px-6 sm:py-10">
+      {reserveConfirmation ? (
+        <div className="pointer-events-none fixed inset-x-0 top-5 z-[60] flex justify-center px-4">
+          <div className="reserve-confirmation rounded-full px-6 py-2.5 text-sm font-semibold text-white shadow-lg">
+            {reserveConfirmation}
+          </div>
+        </div>
+      ) : null}
+
       {connectionState === "disconnected" ? (
         <div className="mb-4 rounded-md border border-amber-300 bg-amber-50 px-3 py-2 text-sm text-amber-900">
           Live updates are reconnecting. Poll fallback runs every 30 seconds.
@@ -589,70 +628,27 @@ export default function PublicWishlistClient({ shareToken }: { shareToken: strin
                   >
                     My activity
                   </Link>
-                  <Link
-                    className="rounded-full border border-sky-200 bg-white/90 px-4 py-2 text-sm font-medium text-sky-900 transition hover:bg-white"
-                    href="/login"
-                  >
-                    Sign in
-                  </Link>
+                  {!authEmail ? (
+                    <Link
+                      className="rounded-full border border-sky-200 bg-white/90 px-4 py-2 text-sm font-medium text-sky-900 transition hover:bg-white"
+                      href="/login"
+                    >
+                      Sign in
+                    </Link>
+                  ) : null}
                 </div>
               </div>
             </div>
 
-            <div className="mt-4 rounded-2xl bg-white/85 p-4 ring-1 ring-zinc-200/80 backdrop-blur-sm">
-              <div className="mb-3 flex items-center justify-between">
-                <p className="text-xs font-semibold uppercase tracking-[0.12em] text-zinc-500">Filter items</p>
-                <button
-                  className="text-xs font-medium text-zinc-500 underline underline-offset-2 transition hover:text-zinc-700 disabled:no-underline disabled:opacity-40"
-                  disabled={!search.trim() && availabilityFilter === "all" && fundingFilter === "all"}
-                  onClick={() => {
-                    setSearch("");
-                    setAvailabilityFilter("all");
-                    setFundingFilter("all");
-                  }}
-                  type="button"
-                >
-                  Reset
-                </button>
-              </div>
-
-              <div className="grid gap-3 lg:grid-cols-[minmax(0,1.4fr)_minmax(0,1fr)_minmax(0,1fr)]">
-                <label className="text-sm">
-                  <span className="mb-1 block text-xs font-semibold uppercase tracking-wide text-zinc-500">Search</span>
-                  <input
-                    className="w-full rounded-xl border border-zinc-300 bg-white px-3 py-2 text-sm outline-none transition focus:border-sky-400 focus:ring-2 focus:ring-sky-100"
-                    onChange={(event) => setSearch(event.target.value)}
-                    placeholder="Type item name or keyword"
-                    value={search}
-                  />
-                </label>
-
-                <label className="text-sm">
-                  <span className="mb-1 block text-xs font-semibold uppercase tracking-wide text-zinc-500">Availability</span>
-                  <select
-                    className="w-full rounded-xl border border-zinc-300 bg-white px-3 py-2 text-sm outline-none transition focus:border-sky-400 focus:ring-2 focus:ring-sky-100"
-                    onChange={(event) => setAvailabilityFilter(event.target.value as "all" | "available" | "reserved")}
-                    value={availabilityFilter}
-                  >
-                    <option value="all">All</option>
-                    <option value="available">Available</option>
-                    <option value="reserved">Reserved</option>
-                  </select>
-                </label>
-
-                <label className="text-sm">
-                  <span className="mb-1 block text-xs font-semibold uppercase tracking-wide text-zinc-500">Funding</span>
-                  <select
-                    className="w-full rounded-xl border border-zinc-300 bg-white px-3 py-2 text-sm outline-none transition focus:border-sky-400 focus:ring-2 focus:ring-sky-100"
-                    onChange={(event) => setFundingFilter(event.target.value as "all" | "group" | "single")}
-                    value={fundingFilter}
-                  >
-                    <option value="all">All items</option>
-                    <option value="group">Group funded</option>
-                    <option value="single">Single gift</option>
-                  </select>
-                </label>
-              </div>
+            <div className="mt-4 flex items-center justify-end gap-2">
+              {hasActiveFilters ? <span className="text-xs font-medium text-sky-800">Filters active</span> : null}
+              <button
+                className="rounded-full border border-sky-200 bg-white px-4 py-1.5 text-xs font-semibold uppercase tracking-[0.08em] text-sky-900 transition hover:bg-sky-50"
+                onClick={() => setIsFilterOpen(true)}
+                type="button"
+              >
+                Filters
+              </button>
             </div>
           </header>
 
@@ -831,6 +827,118 @@ export default function PublicWishlistClient({ shareToken }: { shareToken: strin
           </div>
         </div>
       ) : null}
+
+      {isFilterOpen ? (
+        <div
+          className="fixed inset-0 z-40 flex items-start justify-center bg-black/35 p-4 pt-16 sm:pt-20"
+          onClick={(event) => {
+            if (event.target === event.currentTarget) setIsFilterOpen(false);
+          }}
+        >
+          <div className="w-full max-w-md rounded-2xl bg-white p-4 shadow-xl sm:p-5">
+            <div className="flex items-center justify-between gap-3">
+              <h2 className="text-sm font-semibold uppercase tracking-[0.1em] text-zinc-700">Filters</h2>
+              <button
+                className="rounded-md border border-zinc-300 px-2.5 py-1.5 text-xs font-medium text-zinc-700 transition hover:bg-zinc-50"
+                onClick={() => setIsFilterOpen(false)}
+                type="button"
+              >
+                Close
+              </button>
+            </div>
+
+            <div className="mt-4 space-y-3">
+              <label className="text-sm">
+                <span className="mb-1 block text-xs font-semibold uppercase tracking-wide text-zinc-500">Search</span>
+                <input
+                  className="w-full rounded-xl border border-zinc-300 bg-white px-3 py-2 text-sm outline-none transition focus:border-sky-400 focus:ring-2 focus:ring-sky-100"
+                  onChange={(event) => setSearch(event.target.value)}
+                  placeholder="Type item name or keyword"
+                  value={search}
+                />
+              </label>
+
+              <label className="text-sm">
+                <span className="mb-1 block text-xs font-semibold uppercase tracking-wide text-zinc-500">Availability</span>
+                <select
+                  className="w-full rounded-xl border border-zinc-300 bg-white px-3 py-2 text-sm outline-none transition focus:border-sky-400 focus:ring-2 focus:ring-sky-100"
+                  onChange={(event) => setAvailabilityFilter(event.target.value as "all" | "available" | "reserved")}
+                  value={availabilityFilter}
+                >
+                  <option value="all">All</option>
+                  <option value="available">Available</option>
+                  <option value="reserved">Reserved</option>
+                </select>
+              </label>
+
+              <label className="text-sm">
+                <span className="mb-1 block text-xs font-semibold uppercase tracking-wide text-zinc-500">Funding</span>
+                <select
+                  className="w-full rounded-xl border border-zinc-300 bg-white px-3 py-2 text-sm outline-none transition focus:border-sky-400 focus:ring-2 focus:ring-sky-100"
+                  onChange={(event) => setFundingFilter(event.target.value as "all" | "group" | "single")}
+                  value={fundingFilter}
+                >
+                  <option value="all">All items</option>
+                  <option value="group">Group funded</option>
+                  <option value="single">Single gift</option>
+                </select>
+              </label>
+            </div>
+
+            <div className="mt-5 flex items-center justify-between">
+              <button
+                className="rounded-md border border-zinc-300 px-3 py-2 text-sm font-medium text-zinc-700 transition hover:bg-zinc-50 disabled:opacity-50"
+                disabled={!hasActiveFilters}
+                onClick={() => {
+                  setSearch("");
+                  setAvailabilityFilter("all");
+                  setFundingFilter("all");
+                }}
+                type="button"
+              >
+                Reset
+              </button>
+              <button
+                className="rounded-md bg-sky-600 px-3 py-2 text-sm font-medium text-white transition hover:bg-sky-700"
+                onClick={() => setIsFilterOpen(false)}
+                type="button"
+              >
+                Apply
+              </button>
+            </div>
+          </div>
+        </div>
+      ) : null}
+
+      <style jsx>{`
+        .reserve-confirmation {
+          background-image: linear-gradient(120deg, #2563eb, #7c3aed, #ec4899, #2563eb);
+          background-size: 220% 220%;
+          animation:
+            reserve-confirmation-in 180ms ease-out,
+            reserve-confirmation-gradient 900ms linear infinite;
+        }
+
+        @keyframes reserve-confirmation-in {
+          from {
+            opacity: 0;
+            transform: translateY(-8px) scale(0.97);
+          }
+          to {
+            opacity: 1;
+            transform: translateY(0) scale(1);
+          }
+        }
+
+        @keyframes reserve-confirmation-gradient {
+          0% {
+            background-position: 0% 50%;
+          }
+          100% {
+            background-position: 100% 50%;
+          }
+        }
+      `}</style>
     </main>
   );
 }

@@ -168,6 +168,31 @@ function toAbsoluteHttpUrl(value: string, baseUrl: URL): string | null {
   }
 }
 
+function isAmazonProductImage(parsed: URL): boolean {
+  return parsed.hostname.toLowerCase() === "m.media-amazon.com" && /\/images\/i\//i.test(parsed.pathname);
+}
+
+function upgradeAmazonImageUrl(rawUrl: string): string {
+  try {
+    const parsed = new URL(rawUrl);
+    if (!isAmazonProductImage(parsed)) return rawUrl;
+
+    // Amazon gallery URLs frequently include thumbnail/preview size modifiers like:
+    // .../image._AC_US100_.jpg or .../image._AC_SX679_.jpg
+    // Strip those modifiers to request the original/full-size asset.
+    parsed.pathname = parsed.pathname.replace(/\._[^/]+_\.(jpe?g|png|webp)$/i, ".$1");
+    parsed.search = "";
+    parsed.hash = "";
+    return parsed.toString();
+  } catch {
+    return rawUrl;
+  }
+}
+
+function upgradeImageUrlQuality(rawUrl: string): string {
+  return upgradeAmazonImageUrl(rawUrl);
+}
+
 function normalizeImageUrls(candidates: string[], baseUrl: URL): string[] {
   const normalized: string[] = [];
   const seen = new Set<string>();
@@ -175,9 +200,13 @@ function normalizeImageUrls(candidates: string[], baseUrl: URL): string[] {
   for (const raw of candidates) {
     if (!raw) continue;
     const absolute = toAbsoluteHttpUrl(raw, baseUrl);
-    if (!absolute || seen.has(absolute)) continue;
-    seen.add(absolute);
-    normalized.push(absolute);
+    if (!absolute) continue;
+
+    const upgraded = upgradeImageUrlQuality(absolute);
+    if (seen.has(upgraded)) continue;
+    seen.add(upgraded);
+    normalized.push(upgraded);
+
     if (normalized.length >= MAX_IMAGE_CANDIDATES) break;
   }
 
@@ -280,6 +309,22 @@ function shouldTrustAiPrice(aiPriceCents: number | null, baselinePriceCents: num
 
   const ratio = aiPriceCents / baselinePriceCents;
   return ratio >= 0.9 && ratio <= 1.1;
+}
+
+function shouldReviewImportedPrice(input: {
+  finalPriceCents: number | null;
+  aiPriceCents: number | null;
+  baselinePriceCents: number | null;
+}): boolean {
+  if (input.finalPriceCents === null) return true;
+  if (input.aiPriceCents === null || input.baselinePriceCents === null) return false;
+
+  const delta = Math.abs(input.aiPriceCents - input.baselinePriceCents);
+  if (delta < 100) return false;
+
+  if (input.baselinePriceCents <= 0) return true;
+  const ratio = input.aiPriceCents / input.baselinePriceCents;
+  return ratio < 0.9 || ratio > 1.1;
 }
 
 function cleanTitle(value: string | null): string | null {
@@ -672,7 +717,7 @@ async function inferMetadataWithOpenAi(input: {
           {
             role: "system",
             content:
-              "Extract product metadata from the provided webpage data. Return null for unknown fields. Do not invent facts. For imageUrls, prefer actual product photos from candidateImageUrls. For price, return the exact product price with cents as shown on the page; never round (19.99 must stay 19.99). Ignore shipping, coupons, monthly payments, and accessory prices.",
+              "Extract product metadata from the provided webpage data. Return null for unknown fields. Do not invent facts. For imageUrls, prefer actual product photos from candidateImageUrls and choose highest-resolution variants (avoid thumbnails/sprites/icons). For price, return the exact product price with cents as shown on the page; never round (19.99 must stay 19.99). Ignore shipping, coupons, monthly payments, and accessory prices.",
           },
           {
             role: "user",
@@ -872,6 +917,16 @@ export async function POST(request: NextRequest) {
     const priceCents = shouldTrustAiPrice(aiPriceCents, baselinePriceCents)
       ? aiPriceCents
       : baselinePriceCents ?? aiPriceCents;
+    const priceNeedsReview = shouldReviewImportedPrice({
+      finalPriceCents: priceCents,
+      aiPriceCents,
+      baselinePriceCents,
+    });
+    const priceReviewMessage = priceCents === null
+      ? "Price was not detected. Please enter it manually."
+      : priceNeedsReview
+        ? "Imported price may be inaccurate. Please verify before saving."
+        : null;
 
     return NextResponse.json({
       ok: true as const,
@@ -881,6 +936,8 @@ export async function POST(request: NextRequest) {
         imageUrl: mergedImageUrls[0] || null,
         imageUrls: mergedImageUrls,
         priceCents,
+        priceNeedsReview,
+        priceReviewMessage,
       },
     });
   } catch {

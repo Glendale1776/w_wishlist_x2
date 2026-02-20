@@ -36,6 +36,16 @@ type ItemRow = {
   updated_at: string;
 };
 
+type ReservationRow = {
+  id: string;
+  wishlist_id: string;
+  item_id: string;
+  user_id: string;
+  status: "active" | "released";
+  created_at: string;
+  updated_at: string;
+};
+
 export type ItemAuditAction = "create" | "update" | "archive" | "reserve" | "unreserve" | "contribute";
 
 export type ItemAuditEvent = {
@@ -133,7 +143,7 @@ export type UploadItemImageError =
 export type CreatePreviewError = "NOT_FOUND" | "FORBIDDEN";
 export type ResolvePreviewError = "INVALID_PREVIEW_TOKEN" | "NOT_FOUND";
 
-export type ReservationMutationError = "NOT_FOUND" | "ARCHIVED" | "ALREADY_RESERVED" | "NO_ACTIVE_RESERVATION";
+export type ReservationMutationError = "NOT_FOUND" | "ARCHIVED" | "ALREADY_RESERVED" | "NO_ACTIVE_RESERVATION" | "ACTOR_NOT_FOUND";
 
 export type ContributionMutationError = "NOT_FOUND" | "ARCHIVED" | "NOT_GROUP_FUNDED" | "INVALID_AMOUNT";
 
@@ -180,6 +190,7 @@ export type IdempotencyReadResult =
 const STORAGE_PREFIX = "storage://";
 const RATE_LIMIT_WINDOW_MS = 60_000;
 const ITEM_IMAGE_LIMIT = 10;
+const EMAIL_REGEX = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 
 type ItemStore = {
   items: ItemRecord[];
@@ -189,6 +200,7 @@ type ItemStore = {
   previewTickets: PreviewTicket[];
   reservations: ReservationRecord[];
   contributions: ContributionRecord[];
+  authUserIdByEmail: Record<string, string | null>;
   idempotency: IdempotencyRecord[];
   rateLimits: Record<string, RateLimitWindow>;
 };
@@ -212,6 +224,7 @@ function getStore(): ItemStore {
   if (!store.previewTickets) store.previewTickets = [];
   if (!store.reservations) store.reservations = [];
   if (!store.contributions) store.contributions = [];
+  if (!store.authUserIdByEmail) store.authUserIdByEmail = {};
   if (!store.idempotency) store.idempotency = [];
   if (!store.rateLimits) store.rateLimits = {};
 
@@ -224,6 +237,21 @@ function nowIso() {
 
 function nowMs() {
   return Date.now();
+}
+
+function parsePositiveInt(raw: string | undefined, fallback: number): number {
+  const parsed = Number(raw);
+  if (!Number.isFinite(parsed) || parsed <= 0) return fallback;
+  return Math.floor(parsed);
+}
+
+function normalizeEmail(value: string | null | undefined): string {
+  return (value || "").trim().toLowerCase();
+}
+
+function publicImageSignedUrlTtlSec(): number {
+  const parsed = parsePositiveInt(process.env.PUBLIC_IMAGE_SIGNED_URL_TTL_SEC, 3600);
+  return Math.min(Math.max(parsed, 60), 86400);
 }
 
 function itemSelectColumns() {
@@ -242,6 +270,42 @@ function itemSelectColumns() {
     "created_at",
     "updated_at",
   ].join(",");
+}
+
+function reservationSelectColumns() {
+  return ["id", "wishlist_id", "item_id", "user_id", "status", "created_at", "updated_at"].join(",");
+}
+
+async function resolveActorUserId(actorEmail: string): Promise<string | null> {
+  const normalizedEmail = normalizeEmail(actorEmail);
+  if (!EMAIL_REGEX.test(normalizedEmail)) return null;
+
+  const store = getStore();
+  if (Object.prototype.hasOwnProperty.call(store.authUserIdByEmail, normalizedEmail)) {
+    return store.authUserIdByEmail[normalizedEmail] || null;
+  }
+
+  const supabase = getSupabaseAdminClient();
+  const perPage = 200;
+  let page = 1;
+
+  for (let guard = 0; guard < 200; guard += 1) {
+    const { data, error } = await supabase.auth.admin.listUsers({ page, perPage });
+    if (error) break;
+
+    const users = data?.users || [];
+    const found = users.find((candidate) => normalizeEmail(candidate.email) === normalizedEmail);
+    if (found?.id) {
+      store.authUserIdByEmail[normalizedEmail] = found.id;
+      return found.id;
+    }
+
+    if (!data?.nextPage || users.length === 0) break;
+    page = data.nextPage;
+  }
+
+  store.authUserIdByEmail[normalizedEmail] = null;
+  return null;
 }
 
 function mapItemRowToRecord(row: ItemRow, ownerEmail: string): ItemRecord {
@@ -306,6 +370,122 @@ async function listItemRowsByWishlist(wishlistId: string): Promise<ItemRow[]> {
 
   if (error) throw error;
   return (data || []) as unknown as ItemRow[];
+}
+
+async function listActiveReservedItemIds(itemIds: string[]): Promise<Set<string>> {
+  if (itemIds.length === 0) return new Set<string>();
+
+  const supabase = getSupabaseAdminClient();
+  const { data, error } = await supabase
+    .from("reservations")
+    .select("item_id")
+    .eq("status", "active")
+    .in("item_id", itemIds);
+
+  if (error) throw error;
+
+  const reservedIds = new Set<string>();
+  for (const row of (data || []) as Array<{ item_id: string }>) {
+    if (row.item_id) reservedIds.add(row.item_id);
+  }
+  return reservedIds;
+}
+
+async function findActiveReservationRowForItem(itemId: string): Promise<ReservationRow | null> {
+  const supabase = getSupabaseAdminClient();
+  const { data, error } = await supabase
+    .from("reservations")
+    .select(reservationSelectColumns())
+    .eq("item_id", itemId)
+    .eq("status", "active")
+    .maybeSingle();
+
+  if (error) {
+    if (error.code === "PGRST116") return null;
+    throw error;
+  }
+
+  if (!data) return null;
+  return data as unknown as ReservationRow;
+}
+
+async function findLatestReleasedReservationRowForActor(input: {
+  itemId: string;
+  actorUserId: string;
+}): Promise<ReservationRow | null> {
+  const supabase = getSupabaseAdminClient();
+  const { data, error } = await supabase
+    .from("reservations")
+    .select(reservationSelectColumns())
+    .eq("item_id", input.itemId)
+    .eq("user_id", input.actorUserId)
+    .eq("status", "released")
+    .order("updated_at", { ascending: false })
+    .limit(1)
+    .maybeSingle();
+
+  if (error) {
+    if (error.code === "PGRST116") return null;
+    throw error;
+  }
+
+  if (!data) return null;
+  return data as unknown as ReservationRow;
+}
+
+async function findActiveReservationRowForActor(input: {
+  itemId: string;
+  actorUserId: string;
+}): Promise<ReservationRow | null> {
+  const supabase = getSupabaseAdminClient();
+  const { data, error } = await supabase
+    .from("reservations")
+    .select(reservationSelectColumns())
+    .eq("item_id", input.itemId)
+    .eq("user_id", input.actorUserId)
+    .eq("status", "active")
+    .maybeSingle();
+
+  if (error) {
+    if (error.code === "PGRST116") return null;
+    throw error;
+  }
+
+  if (!data) return null;
+  return data as unknown as ReservationRow;
+}
+
+async function touchItemUpdatedAt(itemId: string, updatedAt: string): Promise<ItemRecord | null> {
+  const supabase = getSupabaseAdminClient();
+  const { data, error } = await supabase
+    .from("items")
+    .update({ updated_at: updatedAt })
+    .eq("id", itemId)
+    .select(itemSelectColumns())
+    .maybeSingle();
+
+  if (error) throw error;
+  if (!data) return null;
+
+  const item = mapItemRowToRecord(data as unknown as ItemRow, "");
+  upsertCachedItem(item);
+  return item;
+}
+
+async function findPublicItemForMutation(input: { wishlistId: string; itemId: string }): Promise<ItemRecord | { error: "NOT_FOUND" | "ARCHIVED" }> {
+  const row = await findItemRowById(input.itemId);
+  if (!row || row.wishlist_id !== input.wishlistId) {
+    return { error: "NOT_FOUND" as const };
+  }
+
+  const item = mapItemRowToRecord(row, "");
+  upsertCachedItem(item);
+
+  if (item.archivedAt) {
+    return { error: "ARCHIVED" as const };
+  }
+
+  return item;
 }
 
 async function findItemRowById(itemId: string): Promise<ItemRow | null> {
@@ -388,6 +568,24 @@ function parseStoragePath(reference: string): string {
   return reference.slice(STORAGE_PREFIX.length);
 }
 
+function upgradeExternalImageUrlQuality(value: string): string {
+  if (isStorageRef(value)) return value;
+
+  try {
+    const parsed = new URL(value);
+    if (parsed.hostname.toLowerCase() !== "m.media-amazon.com") return value;
+    if (!/\/images\/i\//i.test(parsed.pathname)) return value;
+
+    // Strip Amazon thumbnail/preview size modifiers, e.g. ._AC_US100_.jpg
+    parsed.pathname = parsed.pathname.replace(/\._[^/]+_\.(jpe?g|png|webp)$/i, ".$1");
+    parsed.search = "";
+    parsed.hash = "";
+    return parsed.toString();
+  } catch {
+    return value;
+  }
+}
+
 function getItemImageUrls(item: Pick<ItemRecord, "imageUrl" | "imageUrls">): string[] {
   if (Array.isArray(item.imageUrls) && item.imageUrls.length > 0) {
     const normalized = item.imageUrls.filter(Boolean);
@@ -402,7 +600,7 @@ function normalizeImageUrls(input: Array<string | null | undefined>): string[] {
   const seen = new Set<string>();
 
   for (const value of input) {
-    const trimmed = (value || "").trim();
+    const trimmed = upgradeExternalImageUrlQuality((value || "").trim());
     if (!trimmed || seen.has(trimmed)) continue;
     seen.add(trimmed);
     normalized.push(trimmed);
@@ -490,7 +688,12 @@ function activeReservationForItem(itemId: string): ReservationRecord | null {
   return found || null;
 }
 
-function buildPublicItemReadModel(item: ItemRecord): PublicItemReadModel {
+function buildPublicItemReadModel(
+  item: ItemRecord,
+  options?: {
+    availability?: "available" | "reserved";
+  },
+): PublicItemReadModel {
   const fundedCents = fundedCentsForItem(item.id);
   const activeReservation = activeReservationForItem(item.id);
   const ratio =
@@ -503,15 +706,45 @@ function buildPublicItemReadModel(item: ItemRecord): PublicItemReadModel {
     title: item.title,
     description: item.description,
     url: item.url,
-    imageUrl: item.imageUrl && !isStorageRef(item.imageUrl) ? item.imageUrl : null,
+    imageUrl: item.imageUrl,
     priceCents: item.priceCents,
     isGroupFunded: item.isGroupFunded,
     targetCents: item.targetCents,
     fundedCents,
     progressRatio: ratio,
-    availability: activeReservation ? "reserved" : "available",
+    availability: options?.availability || (activeReservation ? "reserved" : "available"),
     updatedAt: item.updatedAt,
   };
+}
+
+export async function hydratePublicItemImage(item: PublicItemReadModel): Promise<PublicItemReadModel> {
+  if (!item.imageUrl) return item;
+  if (!isStorageRef(item.imageUrl)) return item;
+
+  const path = parseStoragePath(item.imageUrl);
+  if (!path) {
+    return { ...item, imageUrl: null };
+  }
+
+  try {
+    const supabase = getSupabaseAdminClient();
+    const bucket = getSupabaseStorageBucket();
+    const { data, error } = await supabase
+      .storage
+      .from(bucket)
+      .createSignedUrl(path, publicImageSignedUrlTtlSec());
+
+    if (error || !data?.signedUrl) {
+      return { ...item, imageUrl: null };
+    }
+
+    return {
+      ...item,
+      imageUrl: data.signedUrl,
+    };
+  } catch {
+    return { ...item, imageUrl: null };
+  }
 }
 
 function findActiveReservationForActor(itemId: string, actorEmail: string): ReservationRecord | null {
@@ -722,43 +955,103 @@ export async function listPublicItemsForWishlist(input: { wishlistId: string }):
     upsertCachedItem(item);
   }
 
-  return activeItems.map((item) => buildPublicItemReadModel(item));
+  const reservedItemIds = await listActiveReservedItemIds(activeItems.map((item) => item.id));
+  const baseModels = activeItems.map((item) =>
+    buildPublicItemReadModel(item, {
+      availability: reservedItemIds.has(item.id) ? "reserved" : "available",
+    }),
+  );
+  return Promise.all(baseModels.map((item) => hydratePublicItemImage(item)));
 }
 
-export function reservePublicItem(input: { wishlistId: string; itemId: string; actorEmail: string }) {
-  const store = getStore();
-  const item = store.items.find((candidate) => candidate.id === input.itemId && candidate.wishlistId === input.wishlistId);
-
-  if (!item) {
-    return { error: "NOT_FOUND" as ReservationMutationError };
+export async function reservePublicItem(input: { wishlistId: string; itemId: string; actorEmail: string }) {
+  const actorUserId = await resolveActorUserId(input.actorEmail);
+  if (!actorUserId) {
+    return { error: "ACTOR_NOT_FOUND" as ReservationMutationError };
   }
 
-  if (item.archivedAt) {
-    return { error: "ARCHIVED" as ReservationMutationError };
+  const itemLookup = await findPublicItemForMutation({
+    wishlistId: input.wishlistId,
+    itemId: input.itemId,
+  });
+  if ("error" in itemLookup) {
+    return { error: itemLookup.error as ReservationMutationError };
   }
 
-  const existingActive = activeReservationForItem(item.id);
+  let item = itemLookup;
+  const existingActive = await findActiveReservationRowForItem(item.id);
   if (existingActive) {
-    if (existingActive.actorEmail !== input.actorEmail) {
+    if (existingActive.user_id !== actorUserId) {
       return { error: "ALREADY_RESERVED" as ReservationMutationError };
     }
 
     return {
       reservationStatus: "active" as const,
-      item: buildPublicItemReadModel(item),
+      item: buildPublicItemReadModel(item, { availability: "reserved" }),
       idempotent: true,
     };
   }
 
   const now = nowIso();
-  const existingReleased = store.reservations.find(
-    (reservation) =>
-      reservation.itemId === item.id && reservation.actorEmail === input.actorEmail && reservation.status === "released",
-  );
+  const existingReleased = await findLatestReleasedReservationRowForActor({
+    itemId: item.id,
+    actorUserId,
+  });
+  const supabase = getSupabaseAdminClient();
 
-  if (existingReleased) {
-    existingReleased.status = "active";
-    existingReleased.updatedAt = now;
+  try {
+    if (existingReleased) {
+      const { error } = await supabase
+        .from("reservations")
+        .update({
+          status: "active",
+          updated_at: now,
+        })
+        .eq("id", existingReleased.id);
+
+      if (error) throw error;
+    } else {
+      const { error } = await supabase.from("reservations").insert({
+        wishlist_id: item.wishlistId,
+        item_id: item.id,
+        user_id: actorUserId,
+        status: "active",
+        created_at: now,
+        updated_at: now,
+      });
+
+      if (error) throw error;
+    }
+  } catch (error) {
+    const code = typeof error === "object" && error && "code" in error ? String((error as { code: string }).code) : "";
+    if (code === "23505") {
+      const winner = await findActiveReservationRowForItem(item.id);
+      if (winner?.user_id === actorUserId) {
+        return {
+          reservationStatus: "active" as const,
+          item: buildPublicItemReadModel(item, { availability: "reserved" }),
+          idempotent: true,
+        };
+      }
+      return { error: "ALREADY_RESERVED" as ReservationMutationError };
+    }
+    throw error;
+  }
+
+  const touchedItem = await touchItemUpdatedAt(item.id, now);
+  if (touchedItem) {
+    item = touchedItem;
+  } else {
+    item = { ...item, updatedAt: now };
+  }
+
+  const store = getStore();
+  const cachedReservation = store.reservations.find(
+    (reservation) => reservation.itemId === item.id && reservation.actorEmail === input.actorEmail,
+  );
+  if (cachedReservation) {
+    cachedReservation.status = "active";
+    cachedReservation.updatedAt = now;
   } else {
     store.reservations.unshift({
       id: randomUUID(),
@@ -771,42 +1064,81 @@ export function reservePublicItem(input: { wishlistId: string; itemId: string; a
     });
   }
 
-  item.updatedAt = now;
   logAudit("reserve", item.id, input.actorEmail, item.wishlistId);
 
   return {
     reservationStatus: "active" as const,
-    item: buildPublicItemReadModel(item),
+    item: buildPublicItemReadModel(item, { availability: "reserved" }),
     idempotent: false,
   };
 }
 
-export function unreservePublicItem(input: { wishlistId: string; itemId: string; actorEmail: string }) {
-  const store = getStore();
-  const item = store.items.find((candidate) => candidate.id === input.itemId && candidate.wishlistId === input.wishlistId);
-
-  if (!item) {
-    return { error: "NOT_FOUND" as ReservationMutationError };
+export async function unreservePublicItem(input: { wishlistId: string; itemId: string; actorEmail: string }) {
+  const actorUserId = await resolveActorUserId(input.actorEmail);
+  if (!actorUserId) {
+    return { error: "ACTOR_NOT_FOUND" as ReservationMutationError };
   }
 
-  if (item.archivedAt) {
-    return { error: "ARCHIVED" as ReservationMutationError };
+  const itemLookup = await findPublicItemForMutation({
+    wishlistId: input.wishlistId,
+    itemId: input.itemId,
+  });
+  if ("error" in itemLookup) {
+    return { error: itemLookup.error as ReservationMutationError };
   }
 
-  const actorReservation = findActiveReservationForActor(item.id, input.actorEmail);
+  let item = itemLookup;
+  const actorReservation = await findActiveReservationRowForActor({
+    itemId: item.id,
+    actorUserId,
+  });
   if (!actorReservation) {
     return { error: "NO_ACTIVE_RESERVATION" as ReservationMutationError };
   }
 
-  actorReservation.status = "released";
-  actorReservation.updatedAt = nowIso();
+  const releasedAt = nowIso();
+  const supabase = getSupabaseAdminClient();
+  const { error } = await supabase
+    .from("reservations")
+    .update({
+      status: "released",
+      updated_at: releasedAt,
+    })
+    .eq("id", actorReservation.id);
 
-  item.updatedAt = actorReservation.updatedAt;
+  if (error) throw error;
+
+  const touchedItem = await touchItemUpdatedAt(item.id, releasedAt);
+  if (touchedItem) {
+    item = touchedItem;
+  } else {
+    item = { ...item, updatedAt: releasedAt };
+  }
+
+  const store = getStore();
+  const cachedReservation = store.reservations.find(
+    (reservation) => reservation.itemId === item.id && reservation.actorEmail === input.actorEmail,
+  );
+  if (cachedReservation) {
+    cachedReservation.status = "released";
+    cachedReservation.updatedAt = releasedAt;
+  } else {
+    store.reservations.unshift({
+      id: randomUUID(),
+      wishlistId: item.wishlistId,
+      itemId: item.id,
+      actorEmail: input.actorEmail,
+      status: "released",
+      createdAt: actorReservation.created_at,
+      updatedAt: releasedAt,
+    });
+  }
+
   logAudit("unreserve", item.id, input.actorEmail, item.wishlistId);
 
   return {
     reservationStatus: "released" as const,
-    item: buildPublicItemReadModel(item),
+    item: buildPublicItemReadModel(item, { availability: "available" }),
   };
 }
 

@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 
 import {
   consumeActionRateLimit,
+  hydratePublicItemImage,
   readIdempotency,
   reservePublicItem,
   unreservePublicItem,
@@ -172,12 +173,12 @@ export async function POST(request: NextRequest, context: { params: Promise<{ sh
 
   const mutation =
     action === "reserve"
-      ? reservePublicItem({
+      ? await reservePublicItem({
           wishlistId: resolvedWishlist.wishlist.id,
           itemId,
           actorEmail,
         })
-      : unreservePublicItem({
+      : await unreservePublicItem({
           wishlistId: resolvedWishlist.wishlist.id,
           itemId,
           actorEmail,
@@ -196,15 +197,21 @@ export async function POST(request: NextRequest, context: { params: Promise<{ sh
       return errorResponse(409, "CONFLICT", "You do not have an active reservation for this item.");
     }
 
+    if (mutation.error === "ACTOR_NOT_FOUND") {
+      return errorResponse(401, "AUTH_REQUIRED", "Sign in is required for this action.");
+    }
+
     return errorResponse(409, "CONFLICT", "This action is unavailable for archived items.");
   }
+
+  const hydratedItem = await hydratePublicItemImage(mutation.item);
 
   const responseBody = {
     ok: true as const,
     reservation: {
       status: mutation.reservationStatus,
     },
-    item: mutation.item,
+    item: hydratedItem,
   };
 
   writeIdempotency({

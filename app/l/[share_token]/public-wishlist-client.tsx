@@ -106,15 +106,10 @@ type ArchiveAlertResponse =
     }
   | ApiErrorResponse;
 
-type ActivityFeedResponse =
+type MyReservationsResponse =
   | {
       ok: true;
-      activities: Array<{
-        kind: "reservation" | "contribution" | "visit";
-        itemId: string | null;
-        status: "active" | "released" | null;
-        happenedAt: string;
-      }>;
+      itemIds: string[];
     }
   | ApiErrorResponse;
 
@@ -454,7 +449,7 @@ export default function PublicWishlistClient({ shareToken }: { shareToken: strin
   }, [authEmail, model, shareToken]);
 
   useEffect(() => {
-    if (!model || !authEmail) {
+    if (!authEmail) {
       setMyReservedItemIds([]);
       return;
     }
@@ -463,33 +458,18 @@ export default function PublicWishlistClient({ shareToken }: { shareToken: strin
 
     void (async () => {
       try {
-        const response = await fetch(`/api/me/activity?wishlistId=${encodeURIComponent(model.wishlist.id)}`, {
+        const response = await fetch(`/api/public/${encodeURIComponent(shareToken)}/my-reservations`, {
           headers: {
             "x-actor-email": authEmail,
           },
           cache: "no-store",
         });
-        const payload = (await response.json()) as ActivityFeedResponse;
+        const payload = (await response.json()) as MyReservationsResponse;
         if (!response.ok || !payload.ok) {
           if (!cancelled) setMyReservedItemIds([]);
           return;
         }
-
-        const latestReservationStatusByItem = new Map<string, { happenedAtMs: number; status: "active" | "released" | null }>();
-        for (const activity of payload.activities) {
-          if (activity.kind !== "reservation" || !activity.itemId) continue;
-          const happenedAtMs = Number.isFinite(Date.parse(activity.happenedAt)) ? Date.parse(activity.happenedAt) : 0;
-          const existing = latestReservationStatusByItem.get(activity.itemId);
-          if (!existing || happenedAtMs >= existing.happenedAtMs) {
-            latestReservationStatusByItem.set(activity.itemId, { happenedAtMs, status: activity.status });
-          }
-        }
-
-        const activeReservationItemIds = Array.from(latestReservationStatusByItem.entries())
-          .filter(([, value]) => value.status === "active")
-          .map(([itemId]) => itemId);
-
-        if (!cancelled) setMyReservedItemIds(activeReservationItemIds);
+        if (!cancelled) setMyReservedItemIds(payload.itemIds || []);
       } catch {
         if (!cancelled) setMyReservedItemIds([]);
       }
@@ -498,7 +478,7 @@ export default function PublicWishlistClient({ shareToken }: { shareToken: strin
     return () => {
       cancelled = true;
     };
-  }, [authEmail, model]);
+  }, [authEmail, model?.version, shareToken]);
 
   const filteredItems = useMemo(() => {
     if (!model) return [];
@@ -918,8 +898,8 @@ export default function PublicWishlistClient({ shareToken }: { shareToken: strin
                       </div>
 
                       <div className="min-w-0 flex-1">
-                        <div className="flex flex-wrap items-start justify-between gap-3">
-                          <div>
+                        <div className="grid grid-cols-[minmax(0,1fr)_auto] items-start gap-3">
+                          <div className="min-w-0">
                             <h2 className="text-base font-semibold text-zinc-900">{item.title}</h2>
                             {item.description ? <p className="mt-1 text-xs text-zinc-700">{item.description}</p> : null}
                             <p className="mt-1 text-xs text-zinc-600">
@@ -933,7 +913,7 @@ export default function PublicWishlistClient({ shareToken }: { shareToken: strin
                             ) : null}
                           </div>
                           <span
-                            className={`rounded-full px-2.5 py-1 text-xs font-medium ${
+                            className={`justify-self-end rounded-full px-2.5 py-1 text-xs font-medium ${
                               item.availability === "available"
                                 ? "bg-emerald-100 text-emerald-800"
                                 : reservedByMe

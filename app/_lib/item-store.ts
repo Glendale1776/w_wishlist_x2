@@ -16,6 +16,8 @@ export type ItemRecord = {
   imageUrls: string[];
   isGroupFunded: boolean;
   targetCents: number | null;
+  fundingDeadlineAt: string | null;
+  shortfallPolicy: "owner_decides" | "auto_extend_7d" | "auto_archive";
   fundedCents: number;
   contributorCount: number;
   archivedAt: string | null;
@@ -34,6 +36,8 @@ type ItemRow = {
   image_urls: string[] | null;
   is_group_funded: boolean;
   target_cents: number | null;
+  funding_deadline_at: string | null;
+  shortfall_policy: "owner_decides" | "auto_extend_7d" | "auto_archive";
   archived_at: string | null;
   created_at: string;
   updated_at: string;
@@ -167,6 +171,16 @@ export type ReservationMutationError = "NOT_FOUND" | "ARCHIVED" | "ALREADY_RESER
 
 export type ContributionMutationError = "NOT_FOUND" | "ARCHIVED" | "NOT_GROUP_FUNDED" | "INVALID_AMOUNT" | "ACTOR_NOT_FOUND";
 
+export type ResolveShortfallAction = "extend_7d" | "lower_target_to_funded" | "archive_item";
+
+export type ResolveShortfallError =
+  | "NOT_FOUND"
+  | "FORBIDDEN"
+  | "NOT_GROUP_FUNDED"
+  | "TARGET_UNSET"
+  | "TARGET_ALREADY_REACHED"
+  | "ARCHIVED";
+
 export type PublicItemReadModel = {
   id: string;
   title: string;
@@ -288,6 +302,8 @@ function itemSelectColumns() {
     "image_urls",
     "is_group_funded",
     "target_cents",
+    "funding_deadline_at",
+    "shortfall_policy",
     "archived_at",
     "created_at",
     "updated_at",
@@ -340,6 +356,10 @@ async function resolveActorUserId(actorEmail: string): Promise<string | null> {
 
 function mapItemRowToRecord(row: ItemRow, ownerEmail: string): ItemRecord {
   const normalizedImages = normalizeImageUrls([...(row.image_urls || []), row.image_url]);
+  const normalizedPolicy =
+    row.shortfall_policy === "auto_extend_7d" || row.shortfall_policy === "auto_archive"
+      ? row.shortfall_policy
+      : "owner_decides";
   return {
     id: row.id,
     wishlistId: row.wishlist_id,
@@ -352,6 +372,8 @@ function mapItemRowToRecord(row: ItemRow, ownerEmail: string): ItemRecord {
     imageUrls: normalizedImages,
     isGroupFunded: row.is_group_funded,
     targetCents: row.target_cents,
+    fundingDeadlineAt: row.funding_deadline_at,
+    shortfallPolicy: normalizedPolicy,
     fundedCents: 0,
     contributorCount: 0,
     archivedAt: row.archived_at,
@@ -512,7 +534,7 @@ async function touchItemUpdatedAt(itemId: string, updatedAt: string): Promise<It
   if (error) throw error;
   if (!data) return null;
 
-  const item = mapItemRowToRecord(data as unknown as ItemRow, "");
+  const item = await hydrateContributionStatsForItem(mapItemRowToRecord(data as unknown as ItemRow, ""));
   upsertCachedItem(item);
   return item;
 }
@@ -523,7 +545,7 @@ async function findPublicItemForMutation(input: { wishlistId: string; itemId: st
     return { error: "NOT_FOUND" as const };
   }
 
-  const item = mapItemRowToRecord(row, "");
+  const item = await hydrateContributionStatsForItem(mapItemRowToRecord(row, ""));
   upsertCachedItem(item);
 
   if (item.archivedAt) {
@@ -561,7 +583,7 @@ async function findOwnedItem(input: { itemId: string; ownerEmail: string }): Pro
     return { error: "FORBIDDEN" as const };
   }
 
-  const record = mapItemRowToRecord(row, input.ownerEmail);
+  const record = await hydrateContributionStatsForItem(mapItemRowToRecord(row, input.ownerEmail));
   upsertCachedItem(record);
   return record;
 }
@@ -769,6 +791,34 @@ function buildContributionStatsByItem(rows: ContributionRow[]): Map<string, Cont
   return statsByItem;
 }
 
+async function hydrateContributionStatsForItems(items: ItemRecord[]): Promise<ItemRecord[]> {
+  if (items.length === 0) return items;
+
+  const contributionRows = await listContributionRowsByItemIds(items.map((item) => item.id));
+  const statsByItem = buildContributionStatsByItem(contributionRows);
+
+  return items.map((item) => {
+    const stats = statsByItem.get(item.id);
+    if (!stats) {
+      return {
+        ...item,
+        fundedCents: 0,
+        contributorCount: 0,
+      };
+    }
+    return {
+      ...item,
+      fundedCents: stats.fundedCents,
+      contributorCount: stats.contributorCount,
+    };
+  });
+}
+
+async function hydrateContributionStatsForItem(item: ItemRecord): Promise<ItemRecord> {
+  const [hydrated] = await hydrateContributionStatsForItems([item]);
+  return hydrated;
+}
+
 function activeReservationForItem(itemId: string): ReservationRecord | null {
   const store = getStore();
   const found = store.reservations.find((reservation) => reservation.itemId === itemId && reservation.status === "active");
@@ -888,6 +938,8 @@ export async function createItem(input: {
       image_urls: normalizedImages,
       is_group_funded: input.isGroupFunded,
       target_cents: input.targetCents,
+      funding_deadline_at: null,
+      shortfall_policy: "owner_decides",
       archived_at: null,
       updated_at: now,
     })
@@ -962,7 +1014,7 @@ export async function updateItem(input: {
     throw error || new Error("Unable to update item.");
   }
 
-  const item = mapItemRowToRecord(data as unknown as ItemRow, input.ownerEmail);
+  const item = await hydrateContributionStatsForItem(mapItemRowToRecord(data as unknown as ItemRow, input.ownerEmail));
   upsertCachedItem(item);
 
   const nextSet = new Set(nextImageUrls.filter(isStorageRef).map((value) => parseStoragePath(value)));
@@ -1011,7 +1063,7 @@ export async function archiveItem(input: { itemId: string; ownerEmail: string })
     throw error || new Error("Unable to archive item.");
   }
 
-  const item = mapItemRowToRecord(data as unknown as ItemRow, input.ownerEmail);
+  const item = await hydrateContributionStatsForItem(mapItemRowToRecord(data as unknown as ItemRow, input.ownerEmail));
   upsertCachedItem(item);
   logAudit("archive", item.id, input.ownerEmail, item.wishlistId);
 
@@ -1076,7 +1128,7 @@ export async function restoreArchivedItem(input: { itemId: string; ownerEmail: s
     throw error || new Error("Unable to restore item.");
   }
 
-  const item = mapItemRowToRecord(data as unknown as ItemRow, input.ownerEmail);
+  const item = await hydrateContributionStatsForItem(mapItemRowToRecord(data as unknown as ItemRow, input.ownerEmail));
   upsertCachedItem(item);
   logAudit("update", item.id, input.ownerEmail, item.wishlistId);
 
@@ -1085,23 +1137,100 @@ export async function restoreArchivedItem(input: { itemId: string; ownerEmail: s
   };
 }
 
+function addDaysToIso(baseDate: Date, days: number): string {
+  const next = new Date(baseDate.getTime());
+  next.setUTCDate(next.getUTCDate() + days);
+  return next.toISOString();
+}
+
+export async function resolveGroupFundingShortfall(input: {
+  itemId: string;
+  ownerEmail: string;
+  action: ResolveShortfallAction;
+}) {
+  const owned = await findOwnedItem({
+    itemId: input.itemId,
+    ownerEmail: input.ownerEmail,
+  });
+  if ("error" in owned) return { error: owned.error as ResolveShortfallError };
+
+  if (owned.archivedAt) return { error: "ARCHIVED" as ResolveShortfallError };
+  if (!owned.isGroupFunded) return { error: "NOT_GROUP_FUNDED" as ResolveShortfallError };
+  if (owned.targetCents === null) return { error: "TARGET_UNSET" as ResolveShortfallError };
+
+  const stats = buildContributionStatsByItem(await listContributionRowsByItemIds([owned.id])).get(owned.id) || {
+    fundedCents: 0,
+    contributorCount: 0,
+  };
+
+  if (stats.fundedCents >= owned.targetCents) {
+    return { error: "TARGET_ALREADY_REACHED" as ResolveShortfallError };
+  }
+
+  if (input.action === "archive_item") {
+    const archived = await archiveItem({ itemId: owned.id, ownerEmail: input.ownerEmail });
+    if ("error" in archived) {
+      return { error: archived.error as ResolveShortfallError };
+    }
+    return {
+      item: archived.item,
+      appliedAction: input.action,
+    };
+  }
+
+  const now = nowIso();
+  const updates: {
+    updated_at: string;
+    funding_deadline_at?: string | null;
+    target_cents?: number | null;
+  } = {
+    updated_at: now,
+  };
+
+  if (input.action === "extend_7d") {
+    const nowDate = new Date();
+    let baseDate = nowDate;
+    if (owned.fundingDeadlineAt) {
+      const parsed = new Date(owned.fundingDeadlineAt);
+      if (!Number.isNaN(parsed.getTime()) && parsed.getTime() > nowDate.getTime()) {
+        baseDate = parsed;
+      }
+    }
+    updates.funding_deadline_at = addDaysToIso(baseDate, 7);
+  } else if (input.action === "lower_target_to_funded") {
+    updates.target_cents = stats.fundedCents;
+  }
+
+  const supabase = getSupabaseAdminClient();
+  const { data, error } = await supabase
+    .from("items")
+    .update(updates)
+    .eq("id", owned.id)
+    .select(itemSelectColumns())
+    .single();
+
+  if (error || !data) {
+    throw error || new Error("Unable to resolve shortfall.");
+  }
+
+  const item = await hydrateContributionStatsForItem(mapItemRowToRecord(data as unknown as ItemRow, input.ownerEmail));
+  upsertCachedItem(item);
+  logAudit("update", item.id, input.ownerEmail, item.wishlistId);
+
+  return {
+    item,
+    appliedAction: input.action,
+  };
+}
+
 export async function listItemsForWishlist(input: { wishlistId: string; ownerEmail: string }) {
   const hasAccess = await hasOwnerAccessToWishlist(input.ownerEmail, input.wishlistId);
   if (!hasAccess) return [];
 
   const rows = await listItemRowsByWishlist(input.wishlistId);
-  const items = rows.map((row) => mapItemRowToRecord(row, input.ownerEmail));
-  const contributionRows = await listContributionRowsByItemIds(items.map((item) => item.id));
-  const statsByItem = buildContributionStatsByItem(contributionRows);
-  const hydratedItems = items.map((item) => {
-    const stats = statsByItem.get(item.id);
-    if (!stats) return item;
-    return {
-      ...item,
-      fundedCents: stats.fundedCents,
-      contributorCount: stats.contributorCount,
-    };
-  });
+  const hydratedItems = await hydrateContributionStatsForItems(
+    rows.map((row) => mapItemRowToRecord(row, input.ownerEmail)),
+  );
 
   const store = getStore();
   store.items = store.items.filter(
@@ -1133,6 +1262,30 @@ export async function listPublicItemsForWishlist(input: { wishlistId: string }):
     }),
   );
   return Promise.all(baseModels.map((item) => hydratePublicItemImage(item)));
+}
+
+export async function listActiveReservationItemIdsForActor(input: {
+  wishlistId: string;
+  actorEmail: string;
+}): Promise<string[]> {
+  const actorUserId = await resolveActorUserId(input.actorEmail);
+  if (!actorUserId) return [];
+
+  const supabase = getSupabaseAdminClient();
+  const { data, error } = await supabase
+    .from("reservations")
+    .select("item_id")
+    .eq("wishlist_id", input.wishlistId)
+    .eq("user_id", actorUserId)
+    .eq("status", "active");
+
+  if (error) throw error;
+
+  const itemIds = new Set<string>();
+  for (const row of (data || []) as Array<{ item_id: string }>) {
+    if (row.item_id) itemIds.add(row.item_id);
+  }
+  return Array.from(itemIds);
 }
 
 export async function reservePublicItem(input: { wishlistId: string; itemId: string; actorEmail: string }) {
@@ -1765,7 +1918,7 @@ export async function uploadItemImage(input: {
     return { error: "NOT_FOUND" as UploadItemImageError };
   }
 
-  const item = mapItemRowToRecord(data as unknown as ItemRow, input.ownerEmail);
+  const item = await hydrateContributionStatsForItem(mapItemRowToRecord(data as unknown as ItemRow, input.ownerEmail));
   upsertCachedItem(item);
   logAudit("update", item.id, item.ownerEmail, item.wishlistId);
 
@@ -1864,8 +2017,23 @@ export function pruneItemAuditEvents(input: { retentionDays: number }) {
   };
 }
 
-export async function deleteItemsForWishlist(input: { wishlistId: string; ownerEmail: string }) {
-  const hasAccess = await hasOwnerAccessToWishlist(input.ownerEmail, input.wishlistId);
+export async function deleteItemsForWishlist(input: { wishlistId: string; ownerEmail: string; ownerId?: string }) {
+  let hasAccess = false;
+  const providedOwnerId = input.ownerId?.trim() || "";
+  if (providedOwnerId) {
+    const supabase = getSupabaseAdminClient();
+    const { data, error } = await supabase
+      .from("wishlists")
+      .select("owner_id")
+      .eq("id", input.wishlistId)
+      .maybeSingle();
+
+    if (error && error.code !== "PGRST116") throw error;
+    hasAccess = Boolean(data && (data as { owner_id?: string }).owner_id === providedOwnerId);
+  } else {
+    hasAccess = await hasOwnerAccessToWishlist(input.ownerEmail, input.wishlistId);
+  }
+
   if (!hasAccess) {
     return { deletedCount: 0 };
   }

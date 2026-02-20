@@ -41,6 +41,7 @@ function WishlistsContent() {
   const [loadError, setLoadError] = useState<string | null>(null);
   const [list, setList] = useState<WishlistPreview[]>([]);
   const [deletingWishlistId, setDeletingWishlistId] = useState<string | null>(null);
+  const [confirmDeleteWishlist, setConfirmDeleteWishlist] = useState<WishlistPreview | null>(null);
   const [editingWishlistId, setEditingWishlistId] = useState<string | null>(null);
   const [editDraft, setEditDraft] = useState<WishlistEditDraft>({
     title: "",
@@ -225,10 +226,7 @@ function WishlistsContent() {
   }
 
   async function deleteWishlist(item: WishlistPreview) {
-    const confirmed = window.confirm(
-      `Delete "${item.title}"?\n\nThis will permanently delete the wishlist, all its items, and its share link.`,
-    );
-    if (!confirmed) return;
+    setConfirmDeleteWishlist(null);
 
     const ownerHeaders = await getAuthenticatedOwnerHeaders();
     if (!ownerHeaders) {
@@ -251,23 +249,41 @@ function WishlistsContent() {
       return;
     }
 
-    const payload = (await response.json()) as
+    let payload: (
       | {
           ok: true;
           deletedWishlistId: string;
         }
-      | ApiErrorResponse;
+      | ApiErrorResponse
+      | null
+    ) = null;
+
+    try {
+      payload = (await response.json()) as
+        | {
+            ok: true;
+            deletedWishlistId: string;
+          }
+        | ApiErrorResponse;
+    } catch {
+      payload = null;
+    }
 
     setDeletingWishlistId(null);
 
-    if (!response.ok || !payload.ok) {
+    if (!response.ok || !payload || !payload.ok) {
       if (response.status === 401) {
         persistReturnTo("/wishlists");
         router.replace("/login?returnTo=/wishlists");
         return;
       }
 
-      const message = payload && !payload.ok ? payload.error.message : "Unable to delete wishlist right now.";
+      const message =
+        payload && !payload.ok
+          ? payload.error.message
+          : response.status >= 500
+            ? "Server error while deleting wishlist. Please retry."
+            : "Unable to delete wishlist right now.";
       setToast({ kind: "error", message });
       return;
     }
@@ -352,6 +368,42 @@ function WishlistsContent() {
           role="status"
         >
           {toast.message}
+        </div>
+      ) : null}
+      {confirmDeleteWishlist ? (
+        <div
+          className="fixed inset-0 z-[55] flex items-center justify-center bg-black/40 p-4"
+          onClick={(event) => {
+            if (event.target === event.currentTarget && !deletingWishlistId) {
+              setConfirmDeleteWishlist(null);
+            }
+          }}
+        >
+          <div className="w-full max-w-md rounded-2xl border border-zinc-200 bg-white p-5 shadow-xl sm:p-6">
+            <h2 className="text-lg font-semibold text-zinc-900">Delete wishlist?</h2>
+            <p className="mt-2 text-sm text-zinc-700">
+              This will permanently delete all items and the share link for:
+            </p>
+            <p className="mt-1 text-sm font-semibold text-zinc-900">&quot;{confirmDeleteWishlist.title}&quot;</p>
+            <div className="mt-5 flex flex-wrap items-center justify-end gap-2">
+              <button
+                className="btn-notch"
+                disabled={Boolean(deletingWishlistId)}
+                onClick={() => setConfirmDeleteWishlist(null)}
+                type="button"
+              >
+                Cancel
+              </button>
+              <button
+                className="btn-notch btn-notch--rose"
+                disabled={Boolean(deletingWishlistId)}
+                onClick={() => void deleteWishlist(confirmDeleteWishlist)}
+                type="button"
+              >
+                {deletingWishlistId === confirmDeleteWishlist.id ? "Deleting..." : "Delete wishlist"}
+              </button>
+            </div>
+          </div>
         </div>
       ) : null}
 
@@ -561,7 +613,7 @@ function WishlistsContent() {
                     <button
                       className="btn-notch btn-notch--rose"
                       disabled={deletingWishlistId === item.id}
-                      onClick={() => void deleteWishlist(item)}
+                      onClick={() => setConfirmDeleteWishlist(item)}
                       type="button"
                     >
                       {deletingWishlistId === item.id ? "Deleting..." : "Delete wishlist"}

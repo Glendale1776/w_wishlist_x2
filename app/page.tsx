@@ -87,9 +87,6 @@ export default function Home() {
               <Link className="btn-notch w-full justify-center" href="/me/activity">
                 My activity
               </Link>
-              <Link className="btn-notch w-full justify-center" href="/admin/abuse">
-                Admin tools
-              </Link>
             </div>
           </article>
 

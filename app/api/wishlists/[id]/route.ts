@@ -121,6 +121,7 @@ export async function DELETE(request: NextRequest, context: { params: Promise<{ 
     await deleteItemsForWishlist({
       wishlistId: id,
       ownerEmail: owner.email,
+      ownerId: owner.userId,
     });
 
     const deleted = await deleteWishlistRecord({
@@ -140,7 +141,13 @@ export async function DELETE(request: NextRequest, context: { params: Promise<{ 
       ok: true as const,
       deletedWishlistId: deleted.wishlistId,
     });
-  } catch {
+  } catch (error) {
+    console.error("wishlist_delete_failed", {
+      wishlistId: id,
+      ownerId: owner.userId,
+      ownerEmail: owner.email,
+      error: error instanceof Error ? error.message : "unknown",
+    });
     return errorResponse(500, "INTERNAL_ERROR", "Unable to delete wishlist right now.");
   }
 }

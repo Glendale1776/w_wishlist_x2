@@ -37,6 +37,21 @@ type ItemApiResponse =
       };
     };
 
+type ShortfallResolveResponse =
+  | {
+      ok: true;
+      item: ItemRecord;
+      appliedAction: "extend_7d" | "lower_target_to_funded" | "archive_item";
+    }
+  | {
+      ok: false;
+      error: {
+        code: string;
+        message: string;
+        fieldErrors?: Record<string, string>;
+      };
+    };
+
 type ImagePrepareResponse =
   | {
       ok: true;
@@ -164,6 +179,17 @@ type ItemContributionSummary = {
   fundedCents: number;
   contributorCount: number;
 };
+
+function buildContributionSummaryMap(items: ItemRecord[]): Record<string, ItemContributionSummary> {
+  const next: Record<string, ItemContributionSummary> = {};
+  for (const item of items) {
+    next[item.id] = {
+      fundedCents: item.fundedCents,
+      contributorCount: item.contributorCount,
+    };
+  }
+  return next;
+}
 
 type PendingImage = {
   id: string;
@@ -395,6 +421,8 @@ export default function WishlistEditorPage() {
   const [reviewImageIndex, setReviewImageIndex] = useState(0);
   const [reviewImageError, setReviewImageError] = useState<string | null>(null);
   const [isLoadingReviewImages, setIsLoadingReviewImages] = useState(false);
+  const [shortfallItemId, setShortfallItemId] = useState<string | null>(null);
+  const [isResolvingShortfall, setIsResolvingShortfall] = useState(false);
 
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const pendingImagesRef = useRef<PendingImage[]>([]);
@@ -414,6 +442,10 @@ export default function WishlistEditorPage() {
     () => items.find((item) => item.id === reviewingItemId) || null,
     [items, reviewingItemId],
   );
+  const shortfallItem = useMemo(
+    () => items.find((item) => item.id === shortfallItemId) || null,
+    [items, shortfallItemId],
+  );
   const reviewingContributionSummary = useMemo(() => {
     if (!reviewingItem) return null;
     return (
@@ -423,6 +455,19 @@ export default function WishlistEditorPage() {
       }
     );
   }, [contributionByItemId, reviewingItem]);
+  const shortfallContributionSummary = useMemo(() => {
+    if (!shortfallItem) return null;
+    return (
+      contributionByItemId[shortfallItem.id] || {
+        fundedCents: shortfallItem.fundedCents,
+        contributorCount: shortfallItem.contributorCount,
+      }
+    );
+  }, [contributionByItemId, shortfallItem]);
+  const shortfallRemainingCents = useMemo(() => {
+    if (!shortfallItem || !shortfallItem.isGroupFunded || shortfallItem.targetCents === null) return null;
+    return Math.max(shortfallItem.targetCents - (shortfallContributionSummary?.fundedCents || 0), 0);
+  }, [shortfallContributionSummary, shortfallItem]);
 
   const duplicateUrlWarning = useMemo(() => {
     const normalized = form.url.trim().toLowerCase();
@@ -475,11 +520,13 @@ export default function WishlistEditorPage() {
           const message = payload && !payload.ok ? payload.error.message : "Unable to load items.";
           setLoadError(message);
           setItems([]);
+          setContributionByItemId({});
           setShareUrlPreview(null);
           return;
         }
 
         setItems(payload.items);
+        setContributionByItemId(buildContributionSummaryMap(payload.items));
 
         try {
           const ownerHeaders = await getAuthenticatedOwnerHeaders();
@@ -511,6 +558,7 @@ export default function WishlistEditorPage() {
         if (!cancelled) {
           setLoadError("Unable to load items. Please retry.");
           setItems([]);
+          setContributionByItemId({});
           setShareUrlPreview(null);
         }
       } finally {
@@ -704,6 +752,19 @@ export default function WishlistEditorPage() {
     window.addEventListener("keydown", onWindowKeyDown);
     return () => window.removeEventListener("keydown", onWindowKeyDown);
   }, [reviewingItemId]);
+
+  useEffect(() => {
+    if (!shortfallItemId) return;
+
+    function onWindowKeyDown(event: KeyboardEvent) {
+      if (event.key === "Escape" && !isResolvingShortfall) {
+        setShortfallItemId(null);
+      }
+    }
+
+    window.addEventListener("keydown", onWindowKeyDown);
+    return () => window.removeEventListener("keydown", onWindowKeyDown);
+  }, [isResolvingShortfall, shortfallItemId]);
 
   useEffect(() => {
     if (reviewImageUrls.length === 0) {
@@ -1484,6 +1545,72 @@ export default function WishlistEditorPage() {
     closeItemReview();
   }
 
+  async function onResolveShortfall(
+    itemId: string,
+    action: "extend_7d" | "lower_target_to_funded" | "archive_item",
+  ) {
+    const ownerHeaders = await getAuthenticatedOwnerHeaders();
+    if (!ownerHeaders) {
+      persistReturnTo(`/wishlists/${wishlistId}`);
+      router.replace(`/login?returnTo=${encodeURIComponent(`/wishlists/${wishlistId}`)}`);
+      return;
+    }
+
+    setIsResolvingShortfall(true);
+    setFormError(null);
+    setFormSuccess(null);
+
+    let response: Response;
+    try {
+      response = await fetch(`/api/items/${itemId}/shortfall`, {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          ...ownerHeaders,
+        },
+        body: JSON.stringify({ action }),
+      });
+    } catch {
+      setIsResolvingShortfall(false);
+      setFormError("Unable to resolve shortfall right now. Please retry.");
+      return;
+    }
+
+    const payload = (await response.json()) as ShortfallResolveResponse;
+    setIsResolvingShortfall(false);
+
+    if (!response.ok || !payload.ok) {
+      const message = payload && !payload.ok ? payload.error.message : "Unable to resolve shortfall.";
+      setFormError(message);
+      return;
+    }
+
+    setItems((current) => current.map((item) => (item.id === payload.item.id ? payload.item : item)));
+    setContributionByItemId((current) => ({
+      ...current,
+      [payload.item.id]: {
+        fundedCents: payload.item.fundedCents,
+        contributorCount: payload.item.contributorCount,
+      },
+    }));
+
+    if (payload.appliedAction === "extend_7d") {
+      const deadlineLabel = payload.item.fundingDeadlineAt
+        ? new Date(payload.item.fundingDeadlineAt).toLocaleDateString()
+        : "updated";
+      setFormSuccess(`Deadline extended to ${deadlineLabel}.`);
+    } else if (payload.appliedAction === "lower_target_to_funded") {
+      setFormSuccess("Target updated to current contributed amount.");
+    } else {
+      setFormSuccess("Item archived.");
+      if (reviewingItemId === payload.item.id) {
+        closeItemReview();
+      }
+    }
+
+    setShortfallItemId(null);
+  }
+
   async function copyShareLink(value: string) {
     if (copyLinkFeedbackTimerRef.current) {
       clearTimeout(copyLinkFeedbackTimerRef.current);
@@ -1653,7 +1780,13 @@ export default function WishlistEditorPage() {
       </header>
       {shareLinkError ? <p className="mt-2 text-sm text-rose-700">{shareLinkError}</p> : null}
       {shareLinkMessage ? <p className="mt-2 text-sm text-emerald-700">{shareLinkMessage}</p> : null}
-      {reservationLiveNotice ? <p className="mt-2 text-sm font-medium text-emerald-700">{reservationLiveNotice}</p> : null}
+      {reservationLiveNotice ? (
+        <div className="pointer-events-none fixed inset-0 z-[60] flex items-center justify-center px-4">
+          <div className="w-full max-w-[40rem] rounded-full bg-gradient-to-r from-blue-600 via-violet-600 to-pink-500 px-10 py-4 text-center text-xl font-semibold text-white shadow-2xl">
+            {reservationLiveNotice}
+          </div>
+        </div>
+      ) : null}
 
       <section className="mt-6 grid items-start gap-6 lg:grid-cols-[1fr_1.2fr]">
         <div className="hidden lg:grid lg:col-span-2 lg:grid-cols-[1fr_1.2fr] lg:items-center lg:gap-6">
@@ -1950,6 +2083,11 @@ export default function WishlistEditorPage() {
               };
               const fundedDisplay = `$${(contributionSummary.fundedCents / 100).toFixed(2)}`;
               const contributorLabel = contributionSummary.contributorCount === 1 ? "person" : "people";
+              const shortfallCents =
+                item.isGroupFunded && item.targetCents !== null
+                  ? Math.max(item.targetCents - contributionSummary.fundedCents, 0)
+                  : null;
+              const isUnderTarget = shortfallCents !== null && shortfallCents > 0;
 
               return (
                 <article className="rounded-xl border border-zinc-200 bg-white p-4 shadow-sm" key={item.id}>
@@ -2027,6 +2165,20 @@ export default function WishlistEditorPage() {
                           <p className="mt-1 text-xs text-zinc-700">
                             Contributed: {fundedDisplay} by {contributionSummary.contributorCount} {contributorLabel}
                           </p>
+                          {isUnderTarget ? (
+                            <div className="mt-2 flex flex-wrap items-center gap-2">
+                              <p className="text-xs font-medium text-amber-700">
+                                Remaining: ${(shortfallCents / 100).toFixed(2)}
+                              </p>
+                              <button
+                                className="rounded-md border border-amber-300 bg-amber-50 px-2.5 py-1 text-xs font-medium text-amber-800"
+                                onClick={() => setShortfallItemId(item.id)}
+                                type="button"
+                              >
+                                Resolve shortfall
+                              </button>
+                            </div>
+                          ) : null}
                         </>
                       ) : null}
                     </div>
@@ -2197,6 +2349,77 @@ export default function WishlistEditorPage() {
                   </div>
                 ) : null}
               </div>
+            </div>
+          </section>
+        </div>
+      ) : null}
+
+      {shortfallItem ? (
+        <div
+          className="fixed inset-0 z-[72] flex items-center justify-center bg-zinc-950/45 p-4"
+          onClick={(event) => {
+            if (event.target === event.currentTarget && !isResolvingShortfall) {
+              setShortfallItemId(null);
+            }
+          }}
+        >
+          <section className="w-full max-w-xl rounded-2xl border border-zinc-200 bg-white p-5 shadow-xl sm:p-6">
+            <h3 className="text-lg font-semibold text-zinc-900">Resolve funding shortfall</h3>
+            <p className="mt-1 text-sm text-zinc-700">{shortfallItem.title}</p>
+
+            <div className="mt-4 space-y-1 text-sm text-zinc-700">
+              <p>
+                Target: {shortfallItem.targetCents !== null ? `$${(shortfallItem.targetCents / 100).toFixed(2)}` : "Unset"}
+              </p>
+              <p>Contributed: ${((shortfallContributionSummary?.fundedCents || 0) / 100).toFixed(2)}</p>
+              {shortfallRemainingCents !== null ? <p>Remaining: ${(shortfallRemainingCents / 100).toFixed(2)}</p> : null}
+              {shortfallItem.fundingDeadlineAt ? (
+                <p>Current deadline: {new Date(shortfallItem.fundingDeadlineAt).toLocaleDateString()}</p>
+              ) : (
+                <p>Current deadline: not set</p>
+              )}
+            </div>
+
+            <p className="mt-4 text-xs text-zinc-600">
+              Choose how to handle this item when contributions have not reached the target.
+            </p>
+
+            <div className="mt-4 grid gap-2 sm:grid-cols-2">
+              <button
+                className="rounded-md border border-sky-300 bg-sky-50 px-3 py-2 text-sm font-medium text-sky-800 disabled:opacity-50"
+                disabled={isResolvingShortfall}
+                onClick={() => void onResolveShortfall(shortfallItem.id, "extend_7d")}
+                type="button"
+              >
+                {isResolvingShortfall ? "Applying..." : "Extend deadline +7 days"}
+              </button>
+              <button
+                className="rounded-md border border-indigo-300 bg-indigo-50 px-3 py-2 text-sm font-medium text-indigo-800 disabled:opacity-50"
+                disabled={isResolvingShortfall}
+                onClick={() => void onResolveShortfall(shortfallItem.id, "lower_target_to_funded")}
+                type="button"
+              >
+                {isResolvingShortfall ? "Applying..." : "Set target to contributed"}
+              </button>
+            </div>
+
+            <div className="mt-2 flex flex-wrap items-center justify-between gap-2">
+              <button
+                className="rounded-md border border-zinc-300 px-3 py-2 text-sm font-medium text-zinc-700 disabled:opacity-50"
+                disabled={isResolvingShortfall}
+                onClick={() => setShortfallItemId(null)}
+                type="button"
+              >
+                Cancel
+              </button>
+              <button
+                className="rounded-md border border-rose-300 bg-rose-50 px-3 py-2 text-sm font-medium text-rose-800 disabled:opacity-50"
+                disabled={isResolvingShortfall}
+                onClick={() => void onResolveShortfall(shortfallItem.id, "archive_item")}
+                type="button"
+              >
+                {isResolvingShortfall ? "Applying..." : "Archive item"}
+              </button>
             </div>
           </section>
         </div>

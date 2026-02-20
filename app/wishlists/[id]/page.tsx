@@ -806,12 +806,14 @@ export default function WishlistEditorPage() {
     setFieldErrors((current) => ({ ...current, imageFile: undefined, imageUrls: undefined }));
   }
 
-  function resetForm() {
+  function resetForm(options?: { preserveSuccess?: boolean }) {
     setEditingItemId(null);
     setForm(EMPTY_FORM);
     setFieldErrors({});
     setFormError(null);
-    setFormSuccess(null);
+    if (!options?.preserveSuccess) {
+      setFormSuccess(null);
+    }
     setMetadataMessage(null);
     setPriceReviewNotice(null);
     setImageMessage(null);
@@ -1473,11 +1475,7 @@ export default function WishlistEditorPage() {
 
     setIsSubmitting(false);
 
-    if (!editingItemId) {
-      setForm(EMPTY_FORM);
-      setMetadataMessage(null);
-      clearPendingImages();
-    }
+    resetForm({ preserveSuccess: true });
   }
 
   async function onArchive(itemId: string) {
@@ -1793,7 +1791,7 @@ export default function WishlistEditorPage() {
           <div className="flex items-center justify-between">
             <h2 className="text-lg font-semibold">{editingItemId ? "Edit item" : "Add item"}</h2>
             {editingItemId ? (
-              <button className="text-sm font-medium text-zinc-700 underline" onClick={resetForm} type="button">
+              <button className="text-sm font-medium text-zinc-700 underline" onClick={() => resetForm()} type="button">
                 Cancel edit
               </button>
             ) : null}
@@ -1812,7 +1810,7 @@ export default function WishlistEditorPage() {
           <div className="flex items-center justify-between lg:hidden">
             <h2 className="text-lg font-semibold">{editingItemId ? "Edit item" : "Add item"}</h2>
             {editingItemId ? (
-              <button className="text-sm font-medium text-zinc-700 underline" onClick={resetForm} type="button">
+              <button className="text-sm font-medium text-zinc-700 underline" onClick={() => resetForm()} type="button">
                 Cancel edit
               </button>
             ) : null}
